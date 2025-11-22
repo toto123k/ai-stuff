@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 
+import { createCollectionRoot } from "@/lib/db/fs-queries";
 import { createUser, getUser } from "@/lib/db/queries";
 
 import { signIn } from "./auth";
@@ -66,7 +67,10 @@ export const register = async (
     if (user) {
       return { status: "user_exists" } as RegisterActionState;
     }
-    await createUser(validatedData.email, validatedData.password);
+    const newUser = await createUser(validatedData.email, validatedData.password);
+    if (newUser && newUser.length > 0) {
+      await createCollectionRoot(newUser[0].id, "personal");
+    }
     await signIn("credentials", {
       email: validatedData.email,
       password: validatedData.password,

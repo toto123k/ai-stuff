@@ -1,11 +1,16 @@
-import type { InferSelectModel } from "drizzle-orm";
+import { sql, type InferSelectModel } from "drizzle-orm";
 import {
   boolean,
+  customType,
   foreignKey,
+  index,
+  integer,
   json,
   jsonb,
+  pgEnum,
   pgTable,
   primaryKey,
+  serial,
   text,
   timestamp,
   uuid,
@@ -171,3 +176,49 @@ export const stream = pgTable(
 );
 
 export type Stream = InferSelectModel<typeof stream>;
+
+// 1. Define the Custom Ltree Type
+// Drizzle doesn't natively support ltree, so we define it here.
+const ltree = customType<{ data: string }>({
+  dataType() {
+    return 'ltree';
+  },
+});
+
+// 2. Define Enums
+export const objectTypeEnum = pgEnum('object_type', ['file', 'folder']);
+export const rootTypeEnum = pgEnum('root_type', ['personal', 'organizational']);
+export const permTypeEnum = pgEnum('perm_type', ['read', 'write', 'admin']);
+
+export type ObjectType = (typeof objectTypeEnum.enumValues)[number];
+export type RootType = (typeof rootTypeEnum.enumValues)[number];
+export type PermType = (typeof permTypeEnum.enumValues)[number];
+
+// 3. Filesystem Objects Table (The Tree)
+// 3. Filesystem Objects Table (The Tree)
+export const fsObjects = pgTable('fs_objects', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull(),
+  type: objectTypeEnum('type').notNull(),
+  path: ltree('path').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+}, (table) => ({
+  pathGistIdx: index('path_gist_idx').using('gist', table.path),
+}));
+
+// 4. Root Table (Entry Points)
+export const fsRoots = pgTable('fs_roots', {
+  id: serial('id').primaryKey(),
+  rootFolderId: integer('root_folder_id').references(() => fsObjects.id).notNull(),
+  ownerId: uuid('owner_id').references(() => user.id).notNull(),
+  type: rootTypeEnum('type').notNull(),
+});
+
+// 5. User Permissions Table
+export const userPermissions = pgTable('user_permissions', {
+  userId: uuid('user_id').references(() => user.id).notNull(),
+  folderId: integer('folder_id').references(() => fsObjects.id).notNull(),
+  permission: permTypeEnum('permission').notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.userId, t.folderId] }),
+}));

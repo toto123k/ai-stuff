@@ -1,0 +1,14 @@
+[
+{
+    "id": "chat-model",
+    "name": "Grok Vision",
+    "description": "Advanced multimodal model with vision and text capabilities",
+    "slug": "x-ai/grok-2-vision-1212"
+  },
+  {
+    "id": "chat-model-reasoning",
+    "name": "Claude Sonnet 3.5",
+    "description": "Anthropic general-purpose reasoning model",
+    "slug": "anthropic/claude-3.5-sonnet"
+  }
+]

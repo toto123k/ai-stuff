@@ -1211,3 +1211,19 @@ export const WarningIcon = ({ size = 16 }: { size?: number }) => {
     </svg>
   );
 };
+export const FolderIcon = ({ size = 16 }: { size?: number }) => (
+  <svg
+    height={size}
+    strokeLinejoin="round"
+    style={{ color: "currentcolor" }}
+    viewBox="0 0 16 16"
+    width={size}
+  >
+    <path
+      clipRule="evenodd"
+      d="M1.5 2.5C1.5 1.67157 2.17157 1 3 1H6.5C6.89782 1 7.27936 1.15804 7.56066 1.43934L8.56066 2.43934C8.84196 2.72064 9.2235 2.87868 9.62132 2.87868H13.5C14.3284 2.87868 15 3.55025 15 4.37868V13.5C15 14.3284 14.3284 15 13.5 15H3C2.17157 15 1.5 14.3284 1.5 13.5V2.5ZM3 2.5V13.5H13.5V4.37868H9.62132C8.82568 4.37868 8.0626 4.0626 7.5 3.5L6.5 2.5H3Z"
+      fill="currentColor"
+      fillRule="evenodd"
+    />
+  </svg>
+);

@@ -7,7 +7,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
-import { PlusIcon, TrashIcon } from "@/components/icons";
+import { FolderIcon, PlusIcon, TrashIcon } from "@/components/icons";
 import { SidebarHistory, getChatHistoryPaginationKey } from "@/components/sidebar-history";
 import { SidebarUserNav } from "@/components/sidebar-user-nav";
 import { Button } from "@/components/ui/button";
@@ -86,6 +86,26 @@ export function AppSidebar({ user }: { user: User | undefined }) {
                     </TooltipTrigger>
                     <TooltipContent align="end" className="hidden md:block">
                       Delete All Chats
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+                {user && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        className="h-8 p-1 md:h-fit md:p-2"
+                        onClick={() => {
+                          setOpenMobile(false);
+                          router.push("/library");
+                        }}
+                        type="button"
+                        variant="ghost"
+                      >
+                        <FolderIcon />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent align="end" className="hidden md:block">
+                      Library
                     </TooltipContent>
                   </Tooltip>
                 )}
