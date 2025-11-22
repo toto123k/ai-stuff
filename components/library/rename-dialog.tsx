@@ -1,3 +1,4 @@
+import { useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import {
     Dialog,
@@ -12,10 +13,8 @@ import { FSObject } from "./types";
 interface RenameDialogProps {
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;
-    onSubmit: () => void;
+    onSubmit: (name: string) => void;
     object: FSObject | null;
-    newName: string;
-    setNewName: (name: string) => void;
 }
 
 export const RenameDialog = ({
@@ -23,9 +22,22 @@ export const RenameDialog = ({
     onOpenChange,
     onSubmit,
     object,
-    newName,
-    setNewName,
 }: RenameDialogProps) => {
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (isOpen && inputRef.current && object) {
+            inputRef.current.value = object.name;
+            inputRef.current.focus();
+            inputRef.current.select();
+        }
+    }, [isOpen, object]);
+
+    const handleSubmit = () => {
+        const value = inputRef.current?.value.trim() || "";
+        onSubmit(value);
+    };
+
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
             <DialogContent dir="rtl">
@@ -35,14 +47,13 @@ export const RenameDialog = ({
                     </DialogTitle>
                 </DialogHeader>
                 <Input
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
+                    ref={inputRef}
                     placeholder="שם חדש"
-                    onKeyDown={(e) => e.key === 'Enter' && onSubmit()}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
                 />
                 <DialogFooter>
                     <Button variant="outline" onClick={() => onOpenChange(false)}>ביטול</Button>
-                    <Button onClick={onSubmit}>שמור</Button>
+                    <Button onClick={handleSubmit}>שמור</Button>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

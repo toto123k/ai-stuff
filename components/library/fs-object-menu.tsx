@@ -1,4 +1,4 @@
-import { EditIcon, ShareIcon, TrashIcon } from "lucide-react";
+import { EditIcon, ShareIcon, TrashIcon, InfoIcon } from "lucide-react";
 import { ContextMenuContent } from "@/components/ui/context-menu";
 import { ProtectedMenuItem } from "./protected-menu-item";
 import { FSObject, FSObjectActions } from "./types";
@@ -14,6 +14,13 @@ export const FSObjectMenu = ({ object, actions }: FSObjectMenuProps) => {
 
     return (
         <ContextMenuContent>
+            <ProtectedMenuItem
+                onClick={() => actions.onViewDetails(object)}
+                disabled={false}
+            >
+                <InfoIcon className="ml-2 w-4 h-4" /> פרטים
+            </ProtectedMenuItem>
+
             <ProtectedMenuItem
                 onClick={() => actions.onRename(object)}
                 disabled={!canWrite}

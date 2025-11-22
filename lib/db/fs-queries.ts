@@ -3,13 +3,12 @@ import "server-only";
 import {
   and,
   desc,
-  eq,
   inArray,
   sql,
   aliasedTable,
+  eq,
 } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgres";
 import { ChatSDKError } from "../errors";
 import {
   fsObjects,
