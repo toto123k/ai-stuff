@@ -471,7 +471,6 @@ export function getPermissionSql(userId: string, aliasName: string) {
 }
 
 export async function getObjects(folderId: number, userId: string) {
-  // 1. Get the folder's full path
   const [folder] = await db
     .select({ path: fsObjects.path })
     .from(fsObjects)
@@ -479,62 +478,26 @@ export async function getObjects(folderId: number, userId: string) {
 
   if (!folder) return [];
 
-  // 2. Identify root ID (first segment of path)
-  const rootId = parseInt(folder.path.split(".")[0]);
-
-  // 3. Check if it's a personal or organizational root
-  const [root] = await db
-    .select({ type: fsRoots.type })
-    .from(fsRoots)
-    .where(eq(fsRoots.rootFolderId, rootId));
-
-  const isOrg = root?.type === "organizational";
-
   const f = aliasedTable(fsObjects, "f");
 
-  if (!isOrg) {
-    // Personal: Return all children with 'admin' permission
-    return db
-      .select({
-        id: f.id,
-        name: f.name,
-        type: f.type,
-        path: f.path,
-        createdAt: f.createdAt,
-        permission: sql<PermType>`'admin'::perm_type`,
-      })
-      .from(f)
-      .where(
-        and(
-          // FIXED: Check that the parent's path is exactly one level up
-          sql`${f.path} <@ ${folder.path}::ltree`, // Must be descendant of folder
-          sql`${f.path} ~ ${`${folder.path}.*`}::lquery`, // Direct pattern match
-          sql`nlevel(${f.path}) = nlevel(${folder.path}::ltree) + 1` // Exactly one level deeper
-        )
+  return db
+    .select({
+      id: f.id,
+      name: f.name,
+      type: f.type,
+      path: f.path,
+      createdAt: f.createdAt,
+      permission: getPermissionSql(userId, "f"),
+    })
+    .from(f)
+    .where(
+      and(
+        sql`${f.path} <@ ${folder.path}::ltree`,
+        sql`${f.path} ~ ${`${folder.path}.*`}::lquery`,
+        sql`nlevel(${f.path}) = nlevel(${folder.path}::ltree) + 1`
       )
-      .orderBy(desc(f.type), f.name);
-  } else {
-    // Organizational: Return children with permission check
-    return db
-      .select({
-        id: f.id,
-        name: f.name,
-        type: f.type,
-        path: f.path,
-        createdAt: f.createdAt,
-        permission: getPermissionSql(userId, "f"),
-      })
-      .from(f)
-      .where(
-        and(
-          // FIXED: Same fix for org folders
-          sql`${f.path} <@ ${folder.path}::ltree`, // Must be descendant of folder
-          sql`${f.path} ~ ${`${folder.path}.*`}::lquery`, // Direct pattern match
-          sql`nlevel(${f.path}) = nlevel(${folder.path}::ltree) + 1` // Exactly one level deeper
-        )
-      )
-      .orderBy(desc(f.type), f.name);
-  }
+    )
+    .orderBy(desc(f.type), f.name);
 }
 
 export async function getPersonalRoot(userId: string) {
@@ -547,6 +510,40 @@ export async function getPersonalRoot(userId: string) {
 
   const objects = await getObjects(root.rootFolderId, userId);
   return { objects, rootFolderId: root.rootFolderId };
+}
+
+export async function getSharedRoot(userId: string) {
+  const objects = await getSharedObjects(userId);
+  return { objects, rootFolderId: null }; // No single root for shared items
+}
+
+export async function getSharedObjects(userId: string) {
+  // Get all objects where the user has explicit permissions
+  // and those objects belong to personal roots (not organizational)
+  return db
+    .select({
+      id: fsObjects.id,
+      name: fsObjects.name,
+      type: fsObjects.type,
+      path: fsObjects.path,
+      createdAt: fsObjects.createdAt,
+      permission: userPermissions.permission,
+    })
+    .from(userPermissions)
+    .innerJoin(fsObjects, eq(userPermissions.folderId, fsObjects.id))
+    .where(
+      and(
+        eq(userPermissions.userId, userId),
+        // Check that the root of this object is a personal root
+        sql`EXISTS (
+          SELECT 1 FROM ${fsRoots}
+          WHERE ${fsRoots.rootFolderId} = split_part(${fsObjects.path}::text, '.', 1)::integer
+            AND ${fsRoots.type} = 'personal'
+            AND ${fsRoots.ownerId} != ${userId}
+        )`
+      )
+    )
+    .orderBy(desc(fsObjects.type), fsObjects.name);
 }
 
 export async function getOrganizationalRootFolders(userId: string) {

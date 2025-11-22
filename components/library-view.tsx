@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { DirectionProvider } from "@radix-ui/react-direction";
 import useSWR, { mutate } from "swr";
-import { LoaderIcon, UploadIcon, PlusIcon } from "lucide-react";
+import { LoaderIcon, UploadIcon, PlusIcon, BanIcon } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 import { toast } from "sonner";
 import {
@@ -11,6 +11,7 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuTrigger,
+  ContextMenuSeparator,
 } from "@/components/ui/context-menu";
 import { FSObject, FSObjectActions } from "./library/types";
 import { LibraryHeader } from "./library/library-header";
@@ -22,7 +23,8 @@ import { DeleteDialog } from "./library/delete-dialog";
 import { ShareDialog } from "./library/share-dialog";
 
 export function LibraryView({ userId }: { userId: string }) {
-  const [activeRootType, setActiveRootType] = useState<"personal" | "organizational">("personal");
+  // 1. Added "shared" to the type definition
+  const [activeRootType, setActiveRootType] = useState<"personal" | "organizational" | "shared">("personal");
   const [currentFolderId, setCurrentFolderId] = useState<number | null>(null);
   const [breadcrumbs, setBreadcrumbs] = useState<{ id: number | null, name: string }[]>([
     { id: null, name: "אישי" }
@@ -38,12 +40,18 @@ export function LibraryView({ userId }: { userId: string }) {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 2. Helper to determine if we are in a read-only root (Org or Shared root)
+  const isReadOnlyRoot = currentFolderId === null && activeRootType !== "personal";
+
+  // 3. Updated SWR fetch key logic to include shared
   const { data, error, isLoading } = useSWR<FSObject[] | { objects: FSObject[], rootFolderId: number | null }>(
     currentFolderId
       ? `/api/fs/folders/${currentFolderId}`
       : activeRootType === "personal"
         ? "/api/fs/personal"
-        : "/api/fs/org",
+        : activeRootType === "shared"
+          ? "/api/fs/shared"
+          : "/api/fs/org",
     async (url: string) => {
       const res = await fetch(url);
       if (!res.ok) throw new Error("Failed to fetch");
@@ -54,7 +62,6 @@ export function LibraryView({ userId }: { userId: string }) {
   // Extract objects from response (handle both array and object formats)
   const objects = Array.isArray(data) ? data : data?.objects || [];
 
-  // Update currentFolderId when switching to personal root
   useEffect(() => {
     if (activeRootType === "personal" && !Array.isArray(data) && data?.rootFolderId && currentFolderId === null) {
       setCurrentFolderId(data.rootFolderId);
@@ -67,7 +74,9 @@ export function LibraryView({ userId }: { userId: string }) {
       ? `/api/fs/folders/${currentFolderId}`
       : activeRootType === "personal"
         ? "/api/fs/personal"
-        : "/api/fs/org";
+        : activeRootType === "shared"
+          ? "/api/fs/shared"
+          : "/api/fs/org";
 
   const handleNavigate = (folderId: number, name: string) => {
     setCurrentFolderId(folderId);
@@ -80,27 +89,35 @@ export function LibraryView({ userId }: { userId: string }) {
     setBreadcrumbs(prev => prev.slice(0, index + 1));
   };
 
-  const handleRootTypeChange = (type: "personal" | "organizational") => {
+  // 4. Updated Root Type Change to handle labels including Shared
+  const handleRootTypeChange = (type: "personal" | "organizational" | "shared") => {
     setActiveRootType(type);
     setCurrentFolderId(null);
-    const label = type === "personal" ? "אישי" : "אירגונית";
+
+    let label = "אישי";
+    if (type === "organizational") label = "אירגונית";
+    if (type === "shared") label = "משותף איתי";
+
     setBreadcrumbs([{ id: null, name: label }]);
   };
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    // Allow upload at root level - use null as parentId
+    // 5. Block uploads if in read-only root
+    if (isReadOnlyRoot) {
+      toast.error("לא ניתן להעלות קבצים לתיקיית שורש משותפת או ארגונית");
+      return;
+    }
+
     console.log("Uploading files, currentFolderId:", currentFolderId);
 
     for (const file of acceptedFiles) {
       const formData = new FormData();
       formData.append("file", file);
 
-      // Include parentId even if null - backend should handle root uploads
       if (currentFolderId !== null) {
         formData.append("parentId", currentFolderId.toString());
       }
 
-      // Add root type for root-level uploads
       formData.append("rootType", activeRootType);
 
       try {
@@ -112,40 +129,42 @@ export function LibraryView({ userId }: { userId: string }) {
 
         if (!response.ok) {
           const errorData = await response.text();
-          console.error("Upload failed:", errorData);
           throw new Error(`Upload failed: ${response.status}`);
         }
 
         toast.success(`העלאת ${file.name} הצליחה`);
       } catch (e) {
         console.error("Upload error:", e);
-        toast.error(`העלאת ${file.name} נכשלה: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        toast.error(`העלאת ${file.name} נכשלה`);
       }
     }
     mutate(getCurrentMutateKey());
-  }, [currentFolderId, activeRootType]);
+  }, [currentFolderId, activeRootType, isReadOnlyRoot]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     noClick: true,
-    noKeyboard: true
+    noKeyboard: true,
+    disabled: isReadOnlyRoot // Disable dropzone logic entirely in read-only
   });
 
   const handleCreateFolder = async () => {
+    if (isReadOnlyRoot) {
+      toast.error("אין הרשאות ליצירת תיקייה כאן");
+      return;
+    }
+
     if (!newItemName.trim()) {
       toast.error("אנא הזן שם לתיקייה");
       return;
     }
 
     try {
-      console.log("Creating folder:", newItemName, "Parent:", currentFolderId);
-
       const payload: any = {
         name: newItemName.trim(),
         rootType: activeRootType
       };
 
-      // Only include parentId if we're inside a folder
       if (currentFolderId !== null) {
         payload.parentId = currentFolderId;
       }
@@ -156,24 +175,20 @@ export function LibraryView({ userId }: { userId: string }) {
         body: JSON.stringify(payload),
       });
 
-      if (!res.ok) {
-        const errorData = await res.text();
-        console.error("Create folder failed:", errorData);
-        throw new Error(`Failed to create folder: ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Failed to create folder`);
 
       mutate(getCurrentMutateKey());
       setIsCreateFolderOpen(false);
       setNewItemName("");
       toast.success("התיקייה נוצרה בהצלחה");
     } catch (e) {
-      console.error("Create folder error:", e);
-      toast.error(`יצירת התיקייה נכשלה: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      toast.error("יצירת התיקייה נכשלה");
     }
   };
 
   const handleRename = async () => {
     if (!selectedObject || !newItemName.trim()) return;
+    // Optional: Block renaming if strictly in root of shared/org (though usually root items are folders you can't rename anyway)
     try {
       const endpoint = selectedObject.type === 'folder'
         ? `/api/fs/folders/${selectedObject.id}`
@@ -197,6 +212,8 @@ export function LibraryView({ userId }: { userId: string }) {
 
   const handleDelete = async () => {
     if (!selectedObject) return;
+    // 6. Block delete if strictly in root of shared/org (depends if you want to allow removing the share itself)
+    // For now, assuming standard file operations:
     try {
       const endpoint = selectedObject.type === 'folder'
         ? `/api/fs/folders/${selectedObject.id}`
@@ -214,11 +231,13 @@ export function LibraryView({ userId }: { userId: string }) {
 
   const actions: FSObjectActions = {
     onRename: (obj) => {
+
       setSelectedObject(obj);
       setNewItemName(obj.name);
       setIsRenameOpen(true);
     },
     onDelete: (obj) => {
+
       setSelectedObject(obj);
       setIsDeleteOpen(true);
     },
@@ -246,7 +265,7 @@ export function LibraryView({ userId }: { userId: string }) {
         {/* Content Area */}
         <ContextMenu>
           <ContextMenuTrigger className="flex-1 p-6 overflow-y-auto">
-            {isDragActive && (
+            {isDragActive && !isReadOnlyRoot && (
               <div className="absolute inset-0 bg-primary/10 border-2 border-dashed border-primary z-50 flex items-center justify-center backdrop-blur-sm">
                 <div className="text-xl font-medium text-primary">גרור קבצים כדי להעלות</div>
               </div>
@@ -268,21 +287,35 @@ export function LibraryView({ userId }: { userId: string }) {
                   actions={actions}
                   fileInputRef={fileInputRef}
                 />
+                {objects.length === 0 && (
+                  <div className="text-center text-muted-foreground mt-20">
+                    אין פריטים להצגה
+                  </div>
+                )}
               </div>
             )}
           </ContextMenuTrigger>
 
-          {/* Background Context Menu */}
+          {/* 7. Modified Background Context Menu */}
           <ContextMenuContent>
-            <ContextMenuItem onClick={() => fileInputRef.current?.click()}>
-              <UploadIcon className="w-4 h-4 ml-2" /> העלה קובץ
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => {
-              setNewItemName("");
-              setIsCreateFolderOpen(true);
-            }}>
-              <PlusIcon className="w-4 h-4 ml-2" /> צור תיקייה חדשה
-            </ContextMenuItem>
+            {!isReadOnlyRoot ? (
+              <>
+                <ContextMenuItem onClick={() => fileInputRef.current?.click()}>
+                  <UploadIcon className="w-4 h-4 ml-2" /> העלה קובץ
+                </ContextMenuItem>
+                <ContextMenuItem onClick={() => {
+                  setNewItemName("");
+                  setIsCreateFolderOpen(true);
+                }}>
+                  <PlusIcon className="w-4 h-4 ml-2" /> צור תיקייה חדשה
+                </ContextMenuItem>
+              </>
+            ) : (
+              <ContextMenuItem disabled className="text-muted-foreground">
+                <BanIcon className="w-4 h-4 ml-2" />
+                אין אפשרות להוסיף קבצים כאן
+              </ContextMenuItem>
+            )}
           </ContextMenuContent>
         </ContextMenu>
 
@@ -295,7 +328,6 @@ export function LibraryView({ userId }: { userId: string }) {
           onChange={(e) => {
             if (e.target.files && e.target.files.length > 0) {
               onDrop(Array.from(e.target.files));
-              // Reset the input so the same file can be uploaded again
               e.target.value = '';
             }
           }}
