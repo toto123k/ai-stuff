@@ -1,7 +1,7 @@
 "use client";
 
 import { LoaderIcon, UploadIcon, PlusIcon, BanIcon } from "lucide-react";
-import { useAtom, useSetAtom, useAtomValue } from "jotai";
+import { useSetAtom, useAtomValue } from "jotai";
 import {
     ContextMenu,
     ContextMenuContent,
@@ -23,14 +23,11 @@ export function LibraryContent() {
     const isReadOnlyRoot = useAtomValue(isReadOnlyRootAtom);
     const setIsCreateFolderOpen = useSetAtom(isCreateFolderOpenAtom);
 
-    const { objects, isLoading } = useLibraryData();
+    const { folders, files, isLoading } = useLibraryData();
     const { handleNavigate } = useLibraryNavigation();
     const { fileInputRef, onDrop, getRootProps, getInputProps, isDragActive } =
         useFileUpload();
     const { actions } = useFileOperations();
-
-    const folders = objects?.filter((o) => o.type === "folder") || [];
-    const files = objects?.filter((o) => o.type === "file") || [];
 
     return (
         <div className="flex flex-col h-full" {...getRootProps()}>
@@ -56,12 +53,18 @@ export function LibraryContent() {
                                 onNavigate={handleNavigate}
                                 actions={actions}
                             />
-                            <FilesTable
+                            <FilesTable.Root
                                 files={files}
                                 actions={actions}
                                 fileInputRef={fileInputRef}
-                            />
-                            {objects.length === 0 && (
+                            >
+                                <FilesTable.Count className="mb-4" />
+                                <FilesTable.Container>
+                                    <FilesTable.Header />
+                                    <FilesTable.Body />
+                                </FilesTable.Container>
+                            </FilesTable.Root>
+                            {folders.length === 0 && (
                                 <div className="text-center text-muted-foreground mt-20">
                                     אין פריטים להצגה
                                 </div>

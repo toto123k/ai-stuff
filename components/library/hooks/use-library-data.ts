@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import useSWR, { mutate } from "swr";
+import useSWR from "swr";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { FSObject } from "../types";
 import {
@@ -17,7 +17,7 @@ export function useLibraryData() {
     const setBreadcrumbs = useSetAtom(breadcrumbsAtom);
     const currentMutateKey = useAtomValue(currentMutateKeyAtom);
 
-    const { data, error, isLoading } = useSWR<
+    const { data, error, isLoading, mutate } = useSWR<
         FSObject[] | { objects: FSObject[]; rootFolderId: number | null }
     >(currentMutateKey, async (url: string) => {
         const res = await fetch(url);
@@ -26,6 +26,8 @@ export function useLibraryData() {
     });
 
     const objects = Array.isArray(data) ? data : data?.objects || [];
+    const folders = objects.filter((o) => o.type === "folder");
+    const files = objects.filter((o) => o.type === "file");
 
     useEffect(() => {
         if (
@@ -39,10 +41,11 @@ export function useLibraryData() {
         }
     }, [data, activeRootType, currentFolderId, setCurrentFolderId, setBreadcrumbs]);
 
-    const refresh = () => mutate(currentMutateKey);
+    const refresh = () => mutate();
 
     return {
-        objects,
+        folders,
+        files,
         isLoading,
         error,
         refresh,

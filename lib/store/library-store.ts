@@ -1,4 +1,5 @@
 import { atom } from "jotai";
+import { selectAtom } from "jotai/utils";
 import { FSObject } from "@/components/library/types";
 
 export type RootType = "personal" | "organizational" | "shared";
@@ -39,3 +40,12 @@ export const isMetadataOpenAtom = atom(false);
 
 // Selection & Operation Atoms
 export const selectedObjectAtom = atom<FSObject | null>(null);
+
+// File selection atoms
+export const selectedFileIdsAtom = atom(new Set<number>());
+export const lastClickedFileIdAtom = atom<number | null>(null);
+
+// Creates a stable derived atom for a specific file's selection state
+// Only re-renders when THIS file's selection changes
+export const createFileSelectedAtom = (id: number) =>
+    selectAtom(selectedFileIdsAtom, (ids) => ids.has(id));
