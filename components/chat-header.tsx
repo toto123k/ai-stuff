@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { PlusIcon, VercelIcon } from "./icons";
 import { useSidebar } from "./ui/sidebar";
 import { VisibilitySelector, type VisibilityType } from "./visibility-selector";
-import { LibSelector } from "./library/lib-selector";
 
 function PureChatHeader({
   chatId,
@@ -50,8 +49,6 @@ function PureChatHeader({
           selectedVisibilityType={selectedVisibilityType}
         />
       )}
-
-      <LibSelector />
 
       <Button
         asChild

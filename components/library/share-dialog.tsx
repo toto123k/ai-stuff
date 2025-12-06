@@ -108,7 +108,7 @@ export function ShareDialog({ isOpen, onClose, item }: ShareDialogProps) {
                                 value={targetUserId}
                                 onChange={(e) => setTargetUserId(e.target.value)}
                                 placeholder="00000000-0000-0000-0000-000000000000"
-                                className="text-left" // UUIDs are LTR
+                                className="text-left"
                                 dir="ltr"
                             />
                         </div>

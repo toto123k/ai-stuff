@@ -46,6 +46,7 @@ import { PreviewAttachment } from "./preview-attachment";
 import { SuggestedActions } from "./suggested-actions";
 import { Button } from "./ui/button";
 import type { VisibilityType } from "./visibility-selector";
+import { ContextStage, ContextChip } from "./library/lib-selector";
 
 function PureMultimodalInput({
   chatId,
@@ -253,6 +254,12 @@ function PureMultimodalInput({
         type="file"
       />
 
+      {/* Context Stage - Expanded view for empty chat */}
+      <ContextStage
+        isVisible={messages.length === 0}
+        className="mb-2"
+      />
+
       <PromptInput
         className="rounded-xl border border-border bg-background p-3 shadow-xs transition-all duration-200 focus-within:border-border hover:border-muted-foreground/50"
         onSubmit={(event) => {
@@ -315,6 +322,8 @@ function PureMultimodalInput({
         </div>
         <PromptInputToolbar className="!border-top-0 border-t-0! p-0 shadow-none dark:border-0 dark:border-transparent!">
           <PromptInputTools className="gap-0 sm:gap-0.5">
+            {/* Context Chip - Collapsed view for active chat */}
+            {messages.length > 0 && <ContextChip />}
             <AttachmentsButton
               fileInputRef={fileInputRef}
               selectedModelId={selectedModelId}

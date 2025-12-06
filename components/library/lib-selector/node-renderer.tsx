@@ -46,7 +46,7 @@ export const NodeRenderer = ({
     handleExpand,
     handleSelect,
 }: NodeRendererProps) => {
-    const { isLoaded, isRootCategory, hasNoPermission, isFile, rootType } = element.metadata || {};
+    const { isLoaded, isRootCategory, hasNoPermission, isFile, rootType, hasUnselectableChildren } = element.metadata || {};
     const isLoading = isExpanded && element.children.length === 0 && isBranch && !hasNoPermission && !isLoaded;
 
     return (
@@ -66,7 +66,6 @@ export const NodeRenderer = ({
             )}
             style={{ marginInlineStart: `${(level - 1) * 16}px` }}
         >
-            {/* Expand/Collapse button */}
             {isBranch ? (
                 hasNoPermission ? (
                     <Lock className="size-4 text-muted-foreground" />
@@ -89,20 +88,18 @@ export const NodeRenderer = ({
                 <span className="size-4" />
             )}
 
-            {/* Checkbox */}
             <Checkbox
                 checked={isSelected ? true : isHalfSelected ? "indeterminate" : false}
-                disabled={hasNoPermission}
+                disabled={hasNoPermission || hasUnselectableChildren}
                 onClick={(e) => {
                     e.stopPropagation();
-                    if (!hasNoPermission) {
+                    if (!hasNoPermission && !hasUnselectableChildren) {
                         handleSelect(e);
                     }
                 }}
-                className={cn("mr-1", hasNoPermission && "opacity-50")}
+                className={cn("mr-1", (hasNoPermission || hasUnselectableChildren) && "opacity-50")}
             />
 
-            {/* Icon */}
             {isRootCategory && rootType ? (
                 ROOT_ICONS[rootType]
             ) : isFile ? (
@@ -115,7 +112,6 @@ export const NodeRenderer = ({
                 )
             ) : null}
 
-            {/* Name */}
             <span className={cn("text-sm font-medium truncate", hasNoPermission && "text-muted-foreground")}>
                 {element.name}
             </span>

@@ -26,6 +26,7 @@ export interface TreeNodeMetadata {
     isRootCategory?: boolean;
     permission?: PermType | null;
     hasNoPermission?: boolean;
+    hasUnselectableChildren?: boolean;
     isLoaded?: boolean;
     isFile?: boolean;
     [key: string]: any;

@@ -31,39 +31,26 @@ import {
 } from "./ltree-operators";
 import { caseWhen } from "./case-operators";
 
-// Re-using the connection setup (ideally this should be shared)
 const client = postgres(process.env.POSTGRES_URL!);
 const db = drizzle(client);
 
-// Helper to resolve permission hierarchy
 const PERM_LEVELS: Record<PermType, number> = {
   read: 1,
   write: 2,
   admin: 3,
 };
 
-// ============================================================================
-// REUSABLE SUBQUERY BUILDERS
-// ============================================================================
 
-/**
- * Subquery to get the path of a node by ID.
- * Returns: SELECT path FROM fs_objects WHERE id = nodeId
- */
+
 const getNodePathSubquery = (nodeId: number) => {
   return db
     .select({ path: fsObjects.path })
     .from(fsObjects)
     .where(eq(fsObjects.id, nodeId));
+
+
 };
 
-/**
- * Subquery to check if an object belongs to a personal root owned by someone else.
- * Used for determining shared objects.
- * 
- * @param objectPath - The path column of the object to check
- * @param excludeOwnerId - User ID to exclude (the current user)
- */
 const isFromOtherPersonalRootSubquery = (
   objectPath: typeof fsObjects.path,
   excludeOwnerId: string
@@ -84,19 +71,15 @@ const isFromOtherPersonalRootSubquery = (
     .limit(1);
 };
 
-// ============================================================================
-// PERMISSION QUERIES
-// ============================================================================
+
 
 export async function getEffectivePermission(
   userId: string,
   nodeId: number
 ): Promise<PermType | null> {
   try {
-    // Alias for the permission folder
     const permFolder = aliasedTable(fsObjects, "permFolder");
 
-    // Subquery to get the node's path
     const nodePathSubquery = getNodePathSubquery(nodeId);
 
     const perms = await db
@@ -108,7 +91,6 @@ export async function getEffectivePermission(
       .where(
         and(
           eq(userPermissions.userId, userId),
-          // Check if the node's path is a descendant of the permission folder's path
           sql`(${nodePathSubquery}) <@ ${permFolder.path}`
         )
       )
@@ -140,7 +122,6 @@ export async function createCollectionRoot(
 ) {
   try {
     return await db.transaction(async (tx) => {
-      // 1. Create the root folder object
       const [rootFolder] = await tx
         .insert(fsObjects)
         .values({
@@ -150,21 +131,18 @@ export async function createCollectionRoot(
         })
         .returning();
 
-      // 2. Update path to be just the ID
       const newPath = `${rootFolder.id}`;
       await tx
         .update(fsObjects)
         .set({ path: newPath })
         .where(eq(fsObjects.id, rootFolder.id));
 
-      // 3. Create fsRoots entry
       await tx.insert(fsRoots).values({
         rootFolderId: rootFolder.id,
         ownerId,
         type,
       });
 
-      // 4. Grant admin permission to owner
       await tx.insert(userPermissions).values({
         userId: ownerId,
         folderId: rootFolder.id,
@@ -191,7 +169,6 @@ export async function createFolder(
 
   try {
     return await db.transaction(async (tx) => {
-      // Get parent path
       const [parent] = await tx
         .select({ path: fsObjects.path })
         .from(fsObjects)
@@ -199,7 +176,6 @@ export async function createFolder(
 
       if (!parent) throw new Error("Parent not found");
 
-      // Insert folder
       const [folder] = await tx
         .insert(fsObjects)
         .values({
@@ -209,7 +185,6 @@ export async function createFolder(
         })
         .returning();
 
-      // Update path: parentPath.folderId
       const newPath = `${parent.path}.${folder.id}`;
       await tx
         .update(fsObjects)
@@ -284,7 +259,6 @@ export async function getFile(fileId: number, userId: string) {
 }
 
 export async function deleteObject(objectId: number, userId: string) {
-  // Get object path to find parent
   const [obj] = await db
     .select({ path: fsObjects.path })
     .from(fsObjects)
@@ -292,18 +266,15 @@ export async function deleteObject(objectId: number, userId: string) {
 
   if (!obj) throw new ChatSDKError("not_found:database", "Object not found");
 
-  // Parse path to find parent ID
   const parts = obj.path.split(".");
   const parentId = parts.length > 1 ? parseInt(parts[parts.length - 2]) : null;
 
   if (!parentId) {
-    // Root object? Check admin on self.
     const perm = await getEffectivePermission(userId, objectId);
     if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.admin) {
       throw new ChatSDKError("forbidden:database", "Insufficient permissions");
     }
   } else {
-    // Check write on parent
     const perm = await getEffectivePermission(userId, parentId);
     if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
       throw new ChatSDKError("forbidden:database", "Insufficient permissions");
@@ -311,14 +282,12 @@ export async function deleteObject(objectId: number, userId: string) {
   }
 
   try {
-    // Get path first
     const [target] = await db
       .select({ path: fsObjects.path })
       .from(fsObjects)
       .where(eq(fsObjects.id, objectId));
 
     if (target) {
-      // Delete where path is descendant of target.path
       await db.delete(fsObjects).where(isDescendantOf(fsObjects.path, target.path));
     }
     return true;
@@ -332,8 +301,7 @@ export async function updateObject(
   updates: { name?: string; parentId?: number },
   userId: string
 ) {
-  // Check write permission on object (to rename) or parent (to move)
-  // Simplification: require write on object AND new parent (if moving)
+
 
   const perm = await getEffectivePermission(userId, objectId);
   if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
@@ -341,7 +309,6 @@ export async function updateObject(
   }
 
   if (updates.parentId) {
-    // Check write on new parent
     const newParentPerm = await getEffectivePermission(userId, updates.parentId);
     if (!newParentPerm || PERM_LEVELS[newParentPerm] < PERM_LEVELS.write) {
       throw new ChatSDKError("forbidden:database", "Insufficient permissions on new parent");
@@ -351,7 +318,6 @@ export async function updateObject(
   try {
     return await db.transaction(async (tx) => {
       if (updates.parentId) {
-        // Moving: Need to update path and all children paths
         const [obj] = await tx.select().from(fsObjects).where(eq(fsObjects.id, objectId));
         const [newParent] = await tx.select().from(fsObjects).where(eq(fsObjects.id, updates.parentId!));
 
@@ -360,13 +326,11 @@ export async function updateObject(
         const oldPath = obj.path;
         const newPath = buildChildPath(newParent.path, obj.id);
 
-        // Update self
         await tx.update(fsObjects).set({
           name: updates.name || obj.name,
           path: newPath
         }).where(eq(fsObjects.id, objectId));
 
-        // Update all descendants' paths - replace oldPath prefix with newPath
         await tx
           .update(fsObjects)
           .set({
@@ -379,7 +343,6 @@ export async function updateObject(
             )
           );
       } else if (updates.name) {
-        // Just rename
         await tx.update(fsObjects).set({ name: updates.name }).where(eq(fsObjects.id, objectId));
       }
     });
@@ -394,19 +357,13 @@ export async function addPermission(
   permission: PermType,
   actorId: string
 ) {
-  // Actor must be admin on folder
   const actorPerm = await getEffectivePermission(actorId, folderId);
   if (!actorPerm || PERM_LEVELS[actorPerm] < PERM_LEVELS.admin) {
     throw new ChatSDKError("forbidden:database", "Insufficient permissions");
   }
 
-  // Check if target user already has higher/equal permission inherited
   const targetEffective = await getEffectivePermission(targetUserId, folderId);
   if (targetEffective && PERM_LEVELS[targetEffective] >= PERM_LEVELS[permission]) {
-    // User already has this permission or better.
-    // We can either throw or just return success.
-    // User said: "check if there isnt any higher permmision ot the parent"
-    // I'll return early to avoid redundant DB entries.
     return { message: "User already has equal or higher permission" };
   }
 
@@ -430,7 +387,6 @@ export async function addPermission(
 }
 
 export async function getPermissions(objectID: number, userId: string) {
-  // Check admin permission on the folder itself or inherited
   const perm = await getEffectivePermission(userId, objectID);
   console.log(perm)
   if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.admin) {
@@ -438,7 +394,6 @@ export async function getPermissions(objectID: number, userId: string) {
   }
 
   try {
-    // Get all permissions on this folder and its ancestors in a single query
     const result = await db
       .select({
         userId: userPermissions.userId,
@@ -452,7 +407,6 @@ export async function getPermissions(objectID: number, userId: string) {
       .from(userPermissions)
       .innerJoin(user, eq(userPermissions.userId, user.id))
       .where(
-        // Find all permissions where the permission's folder is an ancestor of our target
         sql`EXISTS (
           SELECT 1 FROM ${fsObjects} AS target
           WHERE target.id = ${objectID}
@@ -463,7 +417,6 @@ export async function getPermissions(objectID: number, userId: string) {
         )`
       );
 
-    // Aggregate to find the highest permission for each user
     const effectivePerms = new Map<string, { userId: string; email: string; permission: PermType }>();
 
     for (const p of result) {
@@ -486,30 +439,18 @@ export async function getPermissions(objectID: number, userId: string) {
   }
 }
 
-/**
- * Get the effective permission for a user on an object using pure Drizzle query builder.
- * 
- * This is designed to be used in a select statement like:
- * .select({ ..., permission: getEffectivePermissionSelect(userId, targetTable) })
- * 
- * @param userId - User ID to check permissions for
- * @param targetTable - The aliased fsObjects table reference
- */
 export const getEffectivePermissionSelect = (
   userId: string,
   targetTable: typeof fsObjects
 ) => {
-  // Aliases for subquery tables
   const permFolder = aliasedTable(fsObjects, "perm_folder");
   const up = aliasedTable(userPermissions, "up_perm");
 
-  // Permission priority order for sorting
   const permissionPriority = caseWhen(eq(up.permission, "admin"), sql<number>`3`)
     .when(eq(up.permission, "write"), sql<number>`2`)
     .when(eq(up.permission, "read"), sql<number>`1`)
     .else(sql<number>`0`);
 
-  // Subquery to get max inherited permission (target path is descendant of permission folder)
   const maxPermSubquery = db
     .select({ permission: up.permission })
     .from(up)
@@ -523,11 +464,9 @@ export const getEffectivePermissionSelect = (
     .orderBy(desc(permissionPriority))
     .limit(1);
 
-  // Aliases for descendant check
   const descFolder = aliasedTable(fsObjects, "desc_folder");
   const upDesc = aliasedTable(userPermissions, "up_desc");
 
-  // Subquery to check if user has permission on any descendant
   const hasDescendantSubquery = db
     .select({ one: sql<number>`1` })
     .from(upDesc)
@@ -541,7 +480,6 @@ export const getEffectivePermissionSelect = (
     )
     .limit(1);
 
-  // Combine: if max_perm exists use it, else if has_descendant return 'read', else null
   return sql<PermType | null>`(
     SELECT COALESCE(
       (${maxPermSubquery}),
@@ -596,9 +534,6 @@ export async function getSharedRoot(userId: string) {
 }
 
 export async function getSharedObjects(userId: string) {
-  // Get all objects where the user has explicit permissions
-  // and those objects belong to personal roots (not organizational)
-  // The root is found by checking which ancestor of the path exists in fsRoots
   return db
     .select({
       id: fsObjects.id,
@@ -613,7 +548,6 @@ export async function getSharedObjects(userId: string) {
     .where(
       and(
         eq(userPermissions.userId, userId),
-        // Check that one of the object's ancestor paths is a personal root owned by someone else
         sql`EXISTS (${isFromOtherPersonalRootSubquery(fsObjects.path, userId)})`
       )
     )
@@ -621,7 +555,6 @@ export async function getSharedObjects(userId: string) {
 }
 
 export async function getOrganizationalRootFolders(userId: string) {
-  // Get all organizational roots
   const orgRoots = await db
     .select({
       id: fsObjects.id,
@@ -638,7 +571,6 @@ export async function getOrganizationalRootFolders(userId: string) {
   return orgRoots;
 }
 
-// Tree node type for hierarchical queries
 export interface TreeNode {
   id: number;
   name: string;
@@ -649,38 +581,16 @@ export interface TreeNode {
   children: TreeNode[] | null; // null = unloaded (at max depth), [] = loaded but empty
 }
 
-/**
- * Get a tree structure of folders and files starting from a folder up to maxDepth levels.
- * SECURITY: Only returns nodes the user has permission to view.
- * 
- * @param startFolderId - The folder to start from
- * @param userId - User ID for permission checking
- * @param maxDepth - Maximum depth to traverse (1 = direct children only)
- * @returns Tree structure with children arrays (null = unloaded, [] = empty folder)
- */
 export async function getTreeHierarchy(
   startFolderId: number,
   userId: string,
   maxDepth: number = 2
 ): Promise<TreeNode | null> {
-  // Get the starting folder
-  const [startFolder] = await db
-    .select({
-      id: fsObjects.id,
-      name: fsObjects.name,
-      type: fsObjects.type,
-      path: fsObjects.path,
-      createdAt: fsObjects.createdAt,
-    })
+  const startPathSubquery = db
+    .select({ path: fsObjects.path })
     .from(fsObjects)
     .where(eq(fsObjects.id, startFolderId));
 
-  if (!startFolder) return null;
-
-  const startLevel = startFolder.path.split(".").length;
-  const maxLevel = startLevel + maxDepth;
-
-  // Query all descendants within maxDepth, including the start folder
   const allNodes = await db
     .select({
       id: fsObjects.id,
@@ -689,34 +599,35 @@ export async function getTreeHierarchy(
       path: fsObjects.path,
       createdAt: fsObjects.createdAt,
       permission: getEffectivePermissionSelect(userId, fsObjects),
+      level: nlevel(fsObjects.path),
+      parentId: sql<number | null>`
+        CASE WHEN nlevel(${fsObjects.path}) > 1 
+        THEN (subpath(${fsObjects.path}, nlevel(${fsObjects.path}) - 2, 1)::text)::int 
+        ELSE NULL END
+      `,
     })
     .from(fsObjects)
     .where(
       and(
-        // Path is descendant of or equal to start folder
-        isDescendantOf(fsObjects.path, startFolder.path),
-        // Within max depth
-        sql`${nlevel(fsObjects.path)} <= ${maxLevel}`
+        sql`${fsObjects.path} <@ (${startPathSubquery})`,
+        sql`nlevel(${fsObjects.path}) <= nlevel((${startPathSubquery})) + ${maxDepth}`
       )
     )
     .orderBy(fsObjects.path);
 
   if (allNodes.length === 0) return null;
 
-  // SECURITY: Filter out nodes where user has no permission
-  const accessibleNodes = allNodes.filter(node => node.permission !== null);
+  const startNode = allNodes.find(n => n.id === startFolderId);
+  if (!startNode || startNode.permission === null) return null;
 
-  if (accessibleNodes.length === 0) return null;
+  const startLevel = startNode.level;
+  const maxLevel = startLevel + maxDepth;
 
-  // Check if user can access the start folder
-  const startNodeData = accessibleNodes.find(n => n.id === startFolderId);
-  if (!startNodeData) return null; // User can't access the starting folder
-
-  // Build a map for quick lookup - only include accessible nodes
   const nodeMap = new Map<number, TreeNode>();
 
-  // Initialize all accessible nodes with children = null (unloaded by default)
-  for (const node of accessibleNodes) {
+  for (const node of allNodes) {
+    if (node.permission === null) continue;
+
     nodeMap.set(node.id, {
       id: node.id,
       name: node.name,
@@ -724,59 +635,24 @@ export async function getTreeHierarchy(
       path: node.path,
       createdAt: node.createdAt,
       permission: node.permission,
-      children: node.type === "folder" ? null : null, // Will be set below
+      children: node.type === "folder" ? (node.level >= maxLevel ? null : []) : null,
     });
   }
 
-  // Build tree structure - only link accessible nodes
-  for (const node of accessibleNodes) {
-    const pathParts = node.path.split(".");
-    const nodeLevel = pathParts.length;
+  for (const node of allNodes) {
+    if (node.permission === null || node.parentId === null) continue;
 
-    // Get parent ID from path
-    if (pathParts.length > 1) {
-      const parentId = parseInt(pathParts[pathParts.length - 2]);
-      const parent = nodeMap.get(parentId);
+    const parent = nodeMap.get(node.parentId);
+    const child = nodeMap.get(node.id);
 
-      if (parent && parent.type === "folder") {
-        // Initialize children array if not already (means this folder is within depth)
-        if (parent.children === null) {
-          parent.children = [];
-        }
-        parent.children.push(nodeMap.get(node.id)!);
-      }
-    }
-
-    // Mark folders at max depth as having null children (unloaded)
-    // Mark folders within depth that have no children in results as empty []
-    const treeNode = nodeMap.get(node.id)!;
-    if (treeNode.type === "folder") {
-      if (nodeLevel >= maxLevel) {
-        // At max depth - children are unloaded
-        treeNode.children = null;
-      } else if (treeNode.children === null) {
-        // Within depth but no children found - empty folder
-        treeNode.children = [];
-      }
+    if (parent && child && parent.type === "folder" && parent.children !== null) {
+      parent.children.push(child);
     }
   }
 
-
-  // Return the start folder as root
   return nodeMap.get(startFolderId) || null;
 }
 
-/**
- * Get tree hierarchies for all root types using existing business logic.
- * 
- * - Personal: Uses getPersonalRoot, then scans depth from personal root folder
- * - Organizational: Uses getOrganizationalRootFolders (shows all org roots, even without permission)
- *   Then scans depth only for roots where user has permission
- * - Shared: Uses getSharedObjects (already permission-filtered), then scans depth from each
- * 
- * @param userId - User ID
- * @param maxDepth - Maximum depth to scan from each root
- */
 export async function getRootsWithHierarchy(
   userId: string,
   maxDepth: number = 3
@@ -785,29 +661,37 @@ export async function getRootsWithHierarchy(
   organizational: TreeNode[];
   shared: TreeNode[];
 }> {
-  // === PERSONAL ===
-  const [personalRoot] = await db
-    .select({ rootFolderId: fsRoots.rootFolderId })
-    .from(fsRoots)
-    .where(and(eq(fsRoots.ownerId, userId), eq(fsRoots.type, "personal")));
+  const [personalRootResult, orgRootsResult, sharedObjectsResult] = await Promise.all([
+    db.select({ rootFolderId: fsRoots.rootFolderId })
+      .from(fsRoots)
+      .where(and(eq(fsRoots.ownerId, userId), eq(fsRoots.type, "personal"))),
+    getOrganizationalRootFolders(userId),
+    getSharedObjects(userId),
+  ]);
 
-  let personal: TreeNode | null = null;
-  if (personalRoot?.rootFolderId) {
-    personal = await getTreeHierarchy(personalRoot.rootFolderId, userId, maxDepth);
-  }
+  const personalRoot = personalRootResult[0];
+  const orgRoots = orgRootsResult;
+  const sharedFolders = sharedObjectsResult.filter(obj => obj.type === "folder");
 
-  // === ORGANIZATIONAL ===
-  const orgRoots = await getOrganizationalRootFolders(userId);
+  const rootIdsToFetch: number[] = [];
+  if (personalRoot?.rootFolderId) rootIdsToFetch.push(personalRoot.rootFolderId);
+  orgRoots.forEach(r => { if (r.permission) rootIdsToFetch.push(r.id); });
+  sharedFolders.forEach(f => rootIdsToFetch.push(f.id));
 
-  // Process sequentially to avoid connection pool exhaustion
-  const organizationalResults: (TreeNode | null)[] = [];
+  const treeResults = await Promise.all(
+    rootIdsToFetch.map(id => getTreeHierarchy(id, userId, maxDepth))
+  );
+
+  let idx = 0;
+  const personal = personalRoot?.rootFolderId ? treeResults[idx++] : null;
+
+  const organizational: TreeNode[] = [];
   for (const root of orgRoots) {
     if (root.permission) {
-      const tree = await getTreeHierarchy(root.id, userId, maxDepth);
-      organizationalResults.push(tree);
+      const tree = treeResults[idx++];
+      if (tree) organizational.push(tree);
     } else {
-      // No permission - return as-is with children: null (can't load)
-      organizationalResults.push({
+      organizational.push({
         id: root.id,
         name: root.name,
         type: root.type as "file" | "folder",
@@ -819,20 +703,41 @@ export async function getRootsWithHierarchy(
     }
   }
 
-  // === SHARED ===
-  const sharedObjects = await getSharedObjects(userId);
-  const sharedFolders = sharedObjects.filter(obj => obj.type === "folder");
-
-  // Process sequentially to avoid connection pool exhaustion
-  const sharedResults: (TreeNode | null)[] = [];
+  const shared: TreeNode[] = [];
   for (const folder of sharedFolders) {
-    const tree = await getTreeHierarchy(folder.id, userId, maxDepth);
-    sharedResults.push(tree);
+    const tree = treeResults[idx++];
+    if (tree) shared.push(tree);
   }
 
-  return {
-    personal,
-    organizational: organizationalResults.filter((t): t is TreeNode => t !== null),
-    shared: sharedResults.filter((t): t is TreeNode => t !== null),
-  };
+  return { personal, organizational, shared };
+}
+
+export async function countFilesUnderFolders(folderIds: number[]): Promise<number> {
+  if (folderIds.length === 0) return 0;
+
+  try {
+    const folders = await db
+      .select({ id: fsObjects.id, path: fsObjects.path })
+      .from(fsObjects)
+      .where(inArray(fsObjects.id, folderIds));
+
+    if (folders.length === 0) return 0;
+
+    const pathConditions = folders.map(f => isDescendantOf(fsObjects.path, f.path));
+
+    const [result] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(fsObjects)
+      .where(
+        and(
+          eq(fsObjects.type, "file"),
+          sql`(${sql.join(pathConditions, sql` OR `)})`
+        )
+      );
+
+    return result?.count ?? 0;
+  } catch (error) {
+    console.error("Failed to count files", error);
+    return 0;
+  }
 }

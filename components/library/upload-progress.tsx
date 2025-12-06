@@ -18,11 +18,9 @@ export function UploadProgress() {
 
     if (uploads.length === 0) return null;
 
-    // Check if all uploads are in a final state (completed or error)
     const isFinished = uploads.every(u => u.status === 'completed' || u.status === 'error');
     const completedCount = uploads.filter(u => u.status === 'completed').length;
 
-    // Only considered "Success" if everything finished and no errors (for the green checkmark)
     const isAllSuccess = completedCount === uploads.length;
 
     return (
@@ -48,7 +46,7 @@ export function UploadProgress() {
                                 <Button
                                     variant="ghost"
                                     size="icon"
-                                    disabled={!isFinished} // Disabled until all done/failed
+                                    disabled={!isFinished}
                                     className="h-8 w-8 hover:bg-destructive/10 hover:text-destructive disabled:opacity-30"
                                     onClick={() => isFinished && setUploads([])}
                                 >
@@ -79,7 +77,6 @@ export function UploadProgress() {
                                             <div className="flex-1 min-w-0 space-y-1.5">
                                                 <div className="flex justify-between gap-2">
                                                     <span className="text-sm font-medium truncate">{u.file.name}</span>
-                                                    {/* Individual remove X is still clickable if you want to cancel a specific file */}
                                                     <Button variant="ghost" size="icon" className="h-6 w-6 -mt-1 -mr-2 opacity-0 group-hover:opacity-100 transition-opacity" onClick={() => removeUpload(u.id)}><X className="h-3.5 w-3.5" /></Button>
                                                 </div>
                                                 {(u.status === 'uploading' || u.status === 'pending') && (

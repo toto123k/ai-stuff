@@ -3,14 +3,14 @@
 import { useRef, useEffect } from "react";
 import TreeView, { INode } from "react-accessible-treeview";
 import { ChevronDown, Loader2 } from "lucide-react";
-import { useAtomValue, useSetAtom } from "jotai";
+import { useSetAtom } from "jotai";
 import { cn } from "@/lib/utils";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "../../ui/dropdown-menu";
 import { Button } from "../../ui/button";
 import { TreeNodeMetadata } from "./types";
 import { NodeRenderer } from "./node-renderer";
 import { useLibTree } from "./use-lib-tree";
-import { libTreeAtom, libSelectedIdsAtom, libHalfSelectedIdsAtom, selectedLibraryItemsAtom } from "@/lib/store/lib-selector-store";
+import { libTreeAtom, libSelectedIdsAtom, libHalfSelectedIdsAtom } from "@/lib/store/lib-selector-store";
 
 export interface LibSelectorProps {
     className?: string;
@@ -22,14 +22,9 @@ export const LibSelector = ({ className, onSelect }: LibSelectorProps) => {
     const loadedAlertRef = useRef<HTMLDivElement>(null);
 
     const setLibTree = useSetAtom(libTreeAtom);
-    const selectedIds = useAtomValue(libSelectedIdsAtom);
     const setSelectedIds = useSetAtom(libSelectedIdsAtom);
     const setHalfSelectedIds = useSetAtom(libHalfSelectedIdsAtom);
 
-    const selectedLibraryItems = useAtomValue(selectedLibraryItemsAtom);
-    console.log(selectedLibraryItems)
-
-    // Sync tree data to store whenever it changes
     useEffect(() => {
         setLibTree(data);
     }, [data, setLibTree]);
@@ -63,13 +58,12 @@ export const LibSelector = ({ className, onSelect }: LibSelectorProps) => {
                         aria-label="בחירת ספריות"
                         onLoadData={handleLoadData}
                         nodeRenderer={(props) => <NodeRenderer {...props} />}
-                        selectedIds={Array.from(selectedIds)}
                         onSelect={({ treeState }) => {
-                            const newSelectedIds = new Set(Array.from(treeState.selectedIds).map(String));
-                            const halfSelectedIds = new Set(Array.from(treeState.halfSelectedIds).map(String));
+                            const newSelectedIds = Array.from(treeState.selectedIds).map(String);
+                            const newHalfSelectedIds = Array.from(treeState.halfSelectedIds).map(String);
                             setSelectedIds(newSelectedIds);
-                            setHalfSelectedIds(halfSelectedIds);
-                            onSelect?.(Array.from(newSelectedIds));
+                            setHalfSelectedIds(newHalfSelectedIds);
+                            onSelect?.(newSelectedIds);
                         }}
                         multiSelect
                         propagateSelect

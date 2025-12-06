@@ -20,7 +20,10 @@ export const flattenApiTree = (
     const isFolder = node.type === "folder";
     const childIds: string[] = [];
 
+    let hasUnselectableChildren = false;
+
     if (node.children && node.children.length > 0) {
+        hasUnselectableChildren = node.children.some(child => !child.permission);
         for (const child of sortChildren(node.children)) {
             childIds.push(`node-${child.id}`);
             flatNodes.push(...flattenApiTree(child, nodeId));
@@ -37,6 +40,7 @@ export const flattenApiTree = (
             folderId: node.id,
             permission: node.permission,
             hasNoPermission,
+            hasUnselectableChildren,
             isLoaded: node.children !== null,
             isFile: !isFolder,
         },
@@ -45,7 +49,6 @@ export const flattenApiTree = (
     return flatNodes;
 };
 
-/** Default empty tree structure */
 export const createEmptyTree = (): FlatTreeNode[] => [
     { id: "root", name: "", children: ["personal", "organizational", "shared"], parent: null },
     { id: "personal", name: "אישי", children: [], parent: "root", isBranch: true, metadata: { rootType: "personal", isRootCategory: true } },

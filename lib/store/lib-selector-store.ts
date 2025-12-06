@@ -1,18 +1,32 @@
 import { atom } from "jotai";
 import { FlatTreeNode } from "@/components/library/lib-selector/types";
 
-// Tree data atom - holds the flat tree structure
+// ============================================================================
+// TREE DATA ATOM
+// ============================================================================
+
+/** Tree data atom - holds the flat tree structure from API */
 export const libTreeAtom = atom<FlatTreeNode[]>([
     { id: "root", name: "", children: [], parent: null }
 ]);
 
-// Selected IDs atom - holds the Set of selected node IDs from TreeView
-export const libSelectedIdsAtom = atom<Set<string>>(new Set<string>());
+/** Flag to track if tree has been loaded */
+export const libTreeLoadedAtom = atom(false);
 
-// Half-selected (indeterminate) IDs atom - holds IDs that are partially selected
-export const libHalfSelectedIdsAtom = atom<Set<string>>(new Set<string>());
+// ============================================================================
+// SELECTION STATE - Simple string arrays, no derived state complexity
+// ============================================================================
 
-/** Result object for a selected item */
+/** Selected node IDs - stored as simple string array for stability */
+export const libSelectedIdsAtom = atom<string[]>([]);
+
+/** Half-selected (indeterminate) node IDs */
+export const libHalfSelectedIdsAtom = atom<string[]>([]);
+
+// ============================================================================
+// DERIVED ATOM - Computes selected items from tree + selection
+// ============================================================================
+
 export interface SelectedLibraryItem {
     id: string;
     name: string;
@@ -21,16 +35,17 @@ export interface SelectedLibraryItem {
 }
 
 /**
- * Derived atom that computes the selected objects using top-down scan:
- * - If a node is fully selected, return it (don't recurse children)
- * - If a node has selected descendants, recurse to find them
- * - If a node is not selected and has no selected descendants, skip it
+ * Derived atom that computes the selected objects.
+ * Uses top-down scan: if a parent is selected, don't include children.
  */
 export const selectedLibraryItemsAtom = atom<SelectedLibraryItem[]>((get) => {
     const tree = get(libTreeAtom);
     const selectedIds = get(libSelectedIdsAtom);
 
-    if (tree.length === 0 || selectedIds.size === 0) return [];
+    if (tree.length === 0 || selectedIds.length === 0) return [];
+
+    // Convert to Set for O(1) lookup
+    const selectedSet = new Set(selectedIds);
 
     // Build a map for quick lookup
     const nodeMap = new Map<string, FlatTreeNode>();
@@ -50,7 +65,7 @@ export const selectedLibraryItemsAtom = atom<SelectedLibraryItem[]>((get) => {
         }
 
         for (const childId of node.children) {
-            if (selectedIds.has(childId) || hasSelectedDescendant(childId)) {
+            if (selectedSet.has(childId) || hasSelectedDescendant(childId)) {
                 descendantCache.set(nodeId, true);
                 return true;
             }
@@ -66,9 +81,8 @@ export const selectedLibraryItemsAtom = atom<SelectedLibraryItem[]>((get) => {
         const node = nodeMap.get(nodeId);
         if (!node) return;
 
-        // Skip root categories (personal, organizational, shared) - they are containers
+        // Skip root categories - they are containers
         if (node.metadata?.isRootCategory) {
-            // Always recurse into root categories
             for (const childId of node.children) {
                 scanNode(childId);
             }
@@ -76,7 +90,7 @@ export const selectedLibraryItemsAtom = atom<SelectedLibraryItem[]>((get) => {
         }
 
         // If fully selected, add it and stop recursion
-        if (selectedIds.has(nodeId)) {
+        if (selectedSet.has(nodeId)) {
             result.push({
                 id: nodeId,
                 name: node.name,
@@ -91,10 +105,7 @@ export const selectedLibraryItemsAtom = atom<SelectedLibraryItem[]>((get) => {
             for (const childId of node.children) {
                 scanNode(childId);
             }
-            return;
         }
-
-        // Not selected and no selected descendants, skip
     };
 
     // Start scanning from root
@@ -106,4 +117,10 @@ export const selectedLibraryItemsAtom = atom<SelectedLibraryItem[]>((get) => {
     }
 
     return result;
+});
+
+
+export const disabledIdsAtom = atom<Set<string>>((get) => {
+    const tree = get(libTreeAtom);
+    return new Set(tree.filter(node => node.metadata?.hasNoPermission).map(node => node.id));
 });

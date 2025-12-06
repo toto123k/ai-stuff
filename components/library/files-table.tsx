@@ -60,7 +60,6 @@ function Root({ files, actions, fileInputRef, children }: RootProps) {
 
     const allFileIds = useMemo(() => files.map(f => f.id), [files]);
 
-    // Clear selection when navigating to a different folder
     useEffect(() => {
         setSelectedIds(new Set());
     }, [allFileIds.join(","), setSelectedIds]);

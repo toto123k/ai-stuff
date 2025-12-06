@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import useSWR from "swr";
+import { useAtom, useSetAtom } from "jotai";
 import { ApiTreeNode, ApiTreeResponse, FlatTreeNode } from "./types";
 import { flattenApiTree, sortChildren, createEmptyTree } from "./utils";
+import { libTreeAtom, libTreeLoadedAtom } from "@/lib/store/lib-selector-store";
 
 const fetcher = (url: string) => fetch(url).then(res => {
     if (!res.ok) throw new Error("Failed to fetch");
@@ -15,11 +17,12 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
     const flatNodes: FlatTreeNode[] = [];
     const rootChildren: string[] = [];
 
-    // Personal
     const personalId = "personal";
     rootChildren.push(personalId);
     const personalChildIds: string[] = [];
+    let personalHasUnselectable = false;
     if (response.personal?.children) {
+        personalHasUnselectable = response.personal.children.some(child => !child.permission);
         for (const child of sortChildren(response.personal.children)) {
             personalChildIds.push(`node-${child.id}`);
             flatNodes.push(...flattenApiTree(child, personalId));
@@ -31,18 +34,22 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
         children: personalChildIds,
         parent: "root",
         isBranch: true,
-        metadata: { rootType: "personal", isRootCategory: true, isLoaded: response.personal?.children !== null },
+        metadata: { rootType: "personal", isRootCategory: true, isLoaded: response.personal?.children !== null, hasUnselectableChildren: personalHasUnselectable },
     });
 
-    // Organizational
     const orgId = "organizational";
     rootChildren.push(orgId);
     const orgChildIds: string[] = [];
+    let orgHasUnselectable = false;
     for (const orgRoot of response.organizational) {
         const orgNodeId = `node-${orgRoot.id}`;
         orgChildIds.push(orgNodeId);
+        if (!orgRoot.permission) orgHasUnselectable = true;
+
         const orgNodeChildIds: string[] = [];
+        let orgRootHasUnselectable = false;
         if (orgRoot.children?.length) {
+            orgRootHasUnselectable = orgRoot.children.some(child => !child.permission);
             for (const child of sortChildren(orgRoot.children)) {
                 orgNodeChildIds.push(`node-${child.id}`);
                 flatNodes.push(...flattenApiTree(child, orgNodeId));
@@ -54,7 +61,7 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
             children: orgNodeChildIds,
             parent: orgId,
             isBranch: true,
-            metadata: { folderId: orgRoot.id, permission: orgRoot.permission, hasNoPermission: !orgRoot.permission, isLoaded: orgRoot.children !== null },
+            metadata: { folderId: orgRoot.id, permission: orgRoot.permission, hasNoPermission: !orgRoot.permission, hasUnselectableChildren: orgRootHasUnselectable, isLoaded: orgRoot.children !== null },
         });
     }
     flatNodes.push({
@@ -63,18 +70,22 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
         children: orgChildIds,
         parent: "root",
         isBranch: true,
-        metadata: { rootType: "organizational", isRootCategory: true, isLoaded: true },
+        metadata: { rootType: "organizational", isRootCategory: true, isLoaded: true, hasUnselectableChildren: orgHasUnselectable },
     });
 
-    // Shared
     const sharedId = "shared";
     rootChildren.push(sharedId);
     const sharedChildIds: string[] = [];
+    let sharedHasUnselectable = false;
     for (const sharedRoot of response.shared) {
         const sharedNodeId = `node-${sharedRoot.id}`;
         sharedChildIds.push(sharedNodeId);
+        if (!sharedRoot.permission) sharedHasUnselectable = true;
+
         const sharedNodeChildIds: string[] = [];
+        let sharedRootHasUnselectable = false;
         if (sharedRoot.children?.length) {
+            sharedRootHasUnselectable = sharedRoot.children.some(child => !child.permission);
             for (const child of sortChildren(sharedRoot.children)) {
                 sharedNodeChildIds.push(`node-${child.id}`);
                 flatNodes.push(...flattenApiTree(child, sharedNodeId));
@@ -86,7 +97,7 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
             children: sharedNodeChildIds,
             parent: sharedId,
             isBranch: true,
-            metadata: { folderId: sharedRoot.id, permission: sharedRoot.permission, hasNoPermission: !sharedRoot.permission, isLoaded: sharedRoot.children !== null },
+            metadata: { folderId: sharedRoot.id, permission: sharedRoot.permission, hasNoPermission: !sharedRoot.permission, hasUnselectableChildren: sharedRootHasUnselectable, isLoaded: sharedRoot.children !== null },
         });
     }
     flatNodes.push({
@@ -95,32 +106,42 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
         children: sharedChildIds,
         parent: "root",
         isBranch: true,
-        metadata: { rootType: "shared", isRootCategory: true, isLoaded: true },
+        metadata: { rootType: "shared", isRootCategory: true, isLoaded: true, hasUnselectableChildren: sharedHasUnselectable },
     });
 
     flatNodes.unshift({ id: "root", name: "", children: rootChildren, parent: null });
     return flatNodes;
 };
 
+/**
+ * Hook to manage library tree data.
+ * Tree data is stored in Jotai atom to persist across component mounts.
+ */
 export const useLibTree = () => {
-    const [data, setData] = useState<FlatTreeNode[]>([{ id: "root", name: "", children: [], parent: null }]);
+    const [treeData, setTreeData] = useAtom(libTreeAtom);
+    const [isLoaded, setIsLoaded] = useAtom(libTreeLoadedAtom);
     const loadedNodesRef = useRef<Set<string>>(new Set());
 
-    const { data: treeData, isLoading, error } = useSWR<ApiTreeResponse>(
+    const { data: apiData, isLoading, error } = useSWR<ApiTreeResponse>(
         "/api/fs/tree?depth=3",
-        fetcher
+        fetcher,
+        {
+            revalidateOnFocus: false,
+            revalidateOnReconnect: false,
+            dedupingInterval: 60000, // Don't refetch for 1 minute
+        }
     );
 
-    // Process tree data when SWR fetches it
     useEffect(() => {
-        if (treeData) {
-            setData(convertApiResponseToFlatTree(treeData));
-        } else if (error) {
-            setData(createEmptyTree());
+        if (apiData && !isLoaded) {
+            setTreeData(convertApiResponseToFlatTree(apiData));
+            setIsLoaded(true);
+        } else if (error && !isLoaded) {
+            setTreeData(createEmptyTree());
+            setIsLoaded(true);
         }
-    }, [treeData, error]);
+    }, [apiData, error, isLoaded, setTreeData, setIsLoaded]);
 
-    // Lazy load handler for deeper levels
     const loadNode = useCallback(async (elementId: string, folderId: number) => {
         if (loadedNodesRef.current.has(elementId)) return;
         loadedNodesRef.current.add(elementId);
@@ -133,31 +154,38 @@ export const useLibTree = () => {
             if (tree?.children) {
                 const allChildNodes: FlatTreeNode[] = [];
                 const directChildIds: string[] = [];
+                const hasUnselectableChildren = tree.children.some(child => !child.permission);
 
                 for (const child of sortChildren(tree.children)) {
                     directChildIds.push(`node-${child.id}`);
                     allChildNodes.push(...flattenApiTree(child, elementId));
                 }
 
-                setData((prev) => {
+                setTreeData((prev) => {
                     const updated = prev.map((node) =>
                         node.id === elementId
-                            ? { ...node, children: directChildIds, metadata: { ...node.metadata, isLoaded: true } }
+                            ? { ...node, children: directChildIds, metadata: { ...node.metadata, isLoaded: true, hasUnselectableChildren } }
                             : node
                     );
                     return [...updated, ...allChildNodes];
                 });
             } else {
-                setData((prev) => prev.map((node) =>
+                setTreeData((prev) => prev.map((node) =>
                     node.id === elementId ? { ...node, metadata: { ...node.metadata, isLoaded: true } } : node
                 ));
             }
         } catch {
-            setData((prev) => prev.map((node) =>
+            setTreeData((prev) => prev.map((node) =>
                 node.id === elementId ? { ...node, metadata: { ...node.metadata, isLoaded: true } } : node
             ));
         }
-    }, []);
+    }, [setTreeData]);
 
-    return { data, isLoading, loadNode };
+    const hasData = treeData.length > 1;
+
+    return {
+        data: treeData,
+        isLoading: isLoading && !hasData,
+        loadNode,
+    };
 };
