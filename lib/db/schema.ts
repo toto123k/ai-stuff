@@ -188,7 +188,7 @@ const ltree = customType<{ data: string }>({
 // 2. Define Enums
 export const objectTypeEnum = pgEnum('object_type', ['file', 'folder']);
 export const rootTypeEnum = pgEnum('root_type', ['personal', 'organizational']);
-export const permTypeEnum = pgEnum('perm_type', ['read', 'write', 'admin']);
+export const permTypeEnum = pgEnum('perm_type', ['read', 'write', 'admin', 'owner']);
 
 export type ObjectType = (typeof objectTypeEnum.enumValues)[number];
 export type RootType = (typeof rootTypeEnum.enumValues)[number];
@@ -206,19 +206,20 @@ export const fsObjects = pgTable('fs_objects', {
   pathGistIdx: index('path_gist_idx').using('gist', table.path),
 }));
 
-// 4. Root Table (Entry Points)
 export const fsRoots = pgTable('fs_roots', {
   id: serial('id').primaryKey(),
   rootFolderId: integer('root_folder_id').references(() => fsObjects.id).notNull(),
-  ownerId: uuid('owner_id').references(() => user.id).notNull(),
   type: rootTypeEnum('type').notNull(),
-});
+}, (table) => ({
+  typeIdx: index('fs_roots_type_idx').on(table.type),
+}));
 
 // 5. User Permissions Table
 export const userPermissions = pgTable('user_permissions', {
   userId: uuid('user_id').references(() => user.id).notNull(),
   folderId: integer('folder_id').references(() => fsObjects.id).notNull(),
   permission: permTypeEnum('permission').notNull(),
-}, (t) => ({
-  pk: primaryKey({ columns: [t.userId, t.folderId] }),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.folderId] }),
+  userIdx: index('user_permissions_user_idx').on(table.userId),
 }));

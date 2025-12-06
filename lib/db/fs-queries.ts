@@ -7,6 +7,8 @@ import {
   sql,
   aliasedTable,
   eq,
+  ne,
+  exists,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgres";
 import { ChatSDKError } from "../errors";
@@ -26,6 +28,7 @@ import {
   ltreeConcat,
   subpath,
   ltreeCast,
+  ltreeEq,
   getParentIdFromPath,
   buildChildPath,
 } from "./ltree-operators";
@@ -38,6 +41,7 @@ const PERM_LEVELS: Record<PermType, number> = {
   read: 1,
   write: 2,
   admin: 3,
+  owner: 4,
 };
 
 
@@ -53,7 +57,7 @@ const getNodePathSubquery = (nodeId: number) => {
 
 const isFromOtherPersonalRootSubquery = (
   objectPath: typeof fsObjects.path,
-  excludeOwnerId: string
+  excludeUserId: string
 ) => {
   const rootObj = aliasedTable(fsObjects, "root_obj");
 
@@ -61,11 +65,15 @@ const isFromOtherPersonalRootSubquery = (
     .select({ one: sql<number>`1` })
     .from(fsRoots)
     .innerJoin(rootObj, eq(fsRoots.rootFolderId, rootObj.id))
+    .innerJoin(userPermissions, and(
+      eq(userPermissions.folderId, rootObj.id),
+      eq(userPermissions.permission, "owner")
+    ))
     .where(
       and(
         isDescendantOf(objectPath, rootObj.path),
         eq(fsRoots.type, "personal"),
-        sql`${fsRoots.ownerId} != ${excludeOwnerId}`
+        ne(userPermissions.userId, excludeUserId)
       )
     )
     .limit(1);
@@ -112,7 +120,7 @@ export async function doesPathExist(path: string): Promise<boolean> {
   const [node] = await db
     .select({ id: fsObjects.id })
     .from(fsObjects)
-    .where(sql`${fsObjects.path} = ${path}::ltree`);
+    .where(ltreeEq(fsObjects.path, path));
   return !!node;
 }
 
@@ -139,14 +147,13 @@ export async function createCollectionRoot(
 
       await tx.insert(fsRoots).values({
         rootFolderId: rootFolder.id,
-        ownerId,
         type,
       });
 
       await tx.insert(userPermissions).values({
         userId: ownerId,
         folderId: rootFolder.id,
-        permission: "admin",
+        permission: "owner",
       });
 
       return { ...rootFolder, path: newPath };
@@ -282,14 +289,7 @@ export async function deleteObject(objectId: number, userId: string) {
   }
 
   try {
-    const [target] = await db
-      .select({ path: fsObjects.path })
-      .from(fsObjects)
-      .where(eq(fsObjects.id, objectId));
-
-    if (target) {
-      await db.delete(fsObjects).where(isDescendantOf(fsObjects.path, target.path));
-    }
+    await db.delete(fsObjects).where(isDescendantOf(fsObjects.path, obj.path));
     return true;
   } catch (error) {
     throw new ChatSDKError("bad_request:database", "Failed to delete object");
@@ -301,18 +301,19 @@ export async function updateObject(
   updates: { name?: string; parentId?: number },
   userId: string
 ) {
+  const permChecks = [getEffectivePermission(userId, objectId)];
+  if (updates.parentId) {
+    permChecks.push(getEffectivePermission(userId, updates.parentId));
+  }
 
+  const [perm, newParentPerm] = await Promise.all(permChecks);
 
-  const perm = await getEffectivePermission(userId, objectId);
   if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
     throw new ChatSDKError("forbidden:database", "Insufficient permissions");
   }
 
-  if (updates.parentId) {
-    const newParentPerm = await getEffectivePermission(userId, updates.parentId);
-    if (!newParentPerm || PERM_LEVELS[newParentPerm] < PERM_LEVELS.write) {
-      throw new ChatSDKError("forbidden:database", "Insufficient permissions on new parent");
-    }
+  if (updates.parentId && (!newParentPerm || PERM_LEVELS[newParentPerm] < PERM_LEVELS.write)) {
+    throw new ChatSDKError("forbidden:database", "Insufficient permissions on new parent");
   }
 
   try {
@@ -339,7 +340,7 @@ export async function updateObject(
           .where(
             and(
               isDescendantOf(fsObjects.path, oldPath),
-              sql`${fsObjects.id} != ${objectId}`
+              ne(fsObjects.id, objectId)
             )
           );
       } else if (updates.name) {
@@ -357,12 +358,15 @@ export async function addPermission(
   permission: PermType,
   actorId: string
 ) {
-  const actorPerm = await getEffectivePermission(actorId, folderId);
+  const [actorPerm, targetEffective] = await Promise.all([
+    getEffectivePermission(actorId, folderId),
+    getEffectivePermission(targetUserId, folderId),
+  ]);
+
   if (!actorPerm || PERM_LEVELS[actorPerm] < PERM_LEVELS.admin) {
     throw new ChatSDKError("forbidden:database", "Insufficient permissions");
   }
 
-  const targetEffective = await getEffectivePermission(targetUserId, folderId);
   if (targetEffective && PERM_LEVELS[targetEffective] >= PERM_LEVELS[permission]) {
     return { message: "User already has equal or higher permission" };
   }
@@ -388,33 +392,52 @@ export async function addPermission(
 
 export async function getPermissions(objectID: number, userId: string) {
   const perm = await getEffectivePermission(userId, objectID);
-  console.log(perm)
   if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.admin) {
     throw new ChatSDKError("forbidden:database", "Insufficient permissions");
   }
 
   try {
+    const permFolderPath = aliasedTable(fsObjects, "permFolderPath");
+    const targetObj = aliasedTable(fsObjects, "targetObj");
+    const ancestorObj = aliasedTable(fsObjects, "ancestorObj");
+
+    const permFolderPathSubquery = sql`(${db
+      .select({ path: permFolderPath.path })
+      .from(permFolderPath)
+      .where(eq(permFolderPath.id, userPermissions.folderId))})`;
+
+    const targetPathSubquery = sql`(${db
+      .select({ path: targetObj.path })
+      .from(targetObj)
+      .where(eq(targetObj.id, objectID))})`;
+
+    const ancestorPathSubquery = sql`(${db
+      .select({ path: ancestorObj.path })
+      .from(ancestorObj)
+      .where(eq(ancestorObj.id, userPermissions.folderId))})`;
+
     const result = await db
       .select({
         userId: userPermissions.userId,
         permission: userPermissions.permission,
         folderId: userPermissions.folderId,
         email: user.email,
-        depth: sql<number>`nlevel((
-          SELECT path FROM ${fsObjects} WHERE id = ${userPermissions.folderId}
-        ))`.as('depth')
+        depth: nlevel(permFolderPathSubquery),
       })
       .from(userPermissions)
       .innerJoin(user, eq(userPermissions.userId, user.id))
       .where(
-        sql`EXISTS (
-          SELECT 1 FROM ${fsObjects} AS target
-          WHERE target.id = ${objectID}
-            AND target.path <@ (
-              SELECT path FROM ${fsObjects} AS ancestor
-              WHERE ancestor.id = ${userPermissions.folderId}
+        exists(
+          db
+            .select({ one: sql<number>`1` })
+            .from(targetObj)
+            .where(
+              and(
+                eq(targetObj.id, objectID),
+                isDescendantOf(targetPathSubquery, ancestorPathSubquery)
+              )
             )
-        )`
+        )
       );
 
     const effectivePerms = new Map<string, { userId: string; email: string; permission: PermType }>();
@@ -443,15 +466,12 @@ export const getEffectivePermissionSelect = (
   userId: string,
   targetTable: typeof fsObjects
 ) => {
-  const permFolder = aliasedTable(fsObjects, "perm_folder");
-  const up = aliasedTable(userPermissions, "up_perm");
+  const permFolder = aliasedTable(fsObjects, "pf");
+  const up = aliasedTable(userPermissions, "up");
+  const descFolder = aliasedTable(fsObjects, "df");
+  const upDesc = aliasedTable(userPermissions, "up_desc");
 
-  const permissionPriority = caseWhen(eq(up.permission, "admin"), sql<number>`3`)
-    .when(eq(up.permission, "write"), sql<number>`2`)
-    .when(eq(up.permission, "read"), sql<number>`1`)
-    .else(sql<number>`0`);
-
-  const maxPermSubquery = db
+  const ancestorPermSubquery = db
     .select({ permission: up.permission })
     .from(up)
     .innerJoin(permFolder, eq(up.folderId, permFolder.id))
@@ -461,29 +481,26 @@ export const getEffectivePermissionSelect = (
         isDescendantOf(targetTable.path, permFolder.path)
       )
     )
-    .orderBy(desc(permissionPriority))
+    .orderBy(desc(nlevel(permFolder.path)))
     .limit(1);
 
-  const descFolder = aliasedTable(fsObjects, "desc_folder");
-  const upDesc = aliasedTable(userPermissions, "up_desc");
-
-  const hasDescendantSubquery = db
-    .select({ one: sql<number>`1` })
+  const descendantPermSubquery = db
+    .select({ permission: sql<PermType>`'read'::perm_type` })
     .from(upDesc)
     .innerJoin(descFolder, eq(upDesc.folderId, descFolder.id))
     .where(
       and(
         eq(upDesc.userId, userId),
         isDescendantOf(descFolder.path, targetTable.path),
-        sql`${descFolder.id} != ${targetTable.id}`
+        ne(descFolder.id, targetTable.id)
       )
     )
     .limit(1);
 
   return sql<PermType | null>`(
     SELECT COALESCE(
-      (${maxPermSubquery}),
-      CASE WHEN EXISTS (${hasDescendantSubquery}) THEN 'read'::perm_type ELSE NULL END
+      (${ancestorPermSubquery}),
+      (${descendantPermSubquery})
     )
   )`;
 };
@@ -509,7 +526,6 @@ export async function getObjects(folderId: number, userId: string) {
     .where(
       and(
         isDescendantOf(fsObjects.path, folder.path),
-        lqueryMatch(fsObjects.path, `${folder.path}.*`),
         sql`${nlevel(fsObjects.path)} = ${nlevel(folder.path)} + 1`
       )
     )
@@ -520,7 +536,12 @@ export async function getPersonalRoot(userId: string) {
   const [root] = await db
     .select({ rootFolderId: fsRoots.rootFolderId })
     .from(fsRoots)
-    .where(and(eq(fsRoots.ownerId, userId), eq(fsRoots.type, "personal")));
+    .innerJoin(userPermissions, and(
+      eq(userPermissions.folderId, fsRoots.rootFolderId),
+      eq(userPermissions.permission, "owner"),
+      eq(userPermissions.userId, userId)
+    ))
+    .where(eq(fsRoots.type, "personal"));
 
   if (!root) return { objects: [], rootFolderId: null };
 
@@ -548,7 +569,7 @@ export async function getSharedObjects(userId: string) {
     .where(
       and(
         eq(userPermissions.userId, userId),
-        sql`EXISTS (${isFromOtherPersonalRootSubquery(fsObjects.path, userId)})`
+        exists(isFromOtherPersonalRootSubquery(fsObjects.path, userId)),
       )
     )
     .orderBy(desc(fsObjects.type), fsObjects.name);
@@ -664,7 +685,12 @@ export async function getRootsWithHierarchy(
   const [personalRootResult, orgRootsResult, sharedObjectsResult] = await Promise.all([
     db.select({ rootFolderId: fsRoots.rootFolderId })
       .from(fsRoots)
-      .where(and(eq(fsRoots.ownerId, userId), eq(fsRoots.type, "personal"))),
+      .innerJoin(userPermissions, and(
+        eq(userPermissions.folderId, fsRoots.rootFolderId),
+        eq(userPermissions.permission, "owner"),
+        eq(userPermissions.userId, userId)
+      ))
+      .where(eq(fsRoots.type, "personal")),
     getOrganizationalRootFolders(userId),
     getSharedObjects(userId),
   ]);
@@ -717,13 +743,11 @@ export async function countFilesUnderFolders(folderIds: number[]): Promise<numbe
 
   try {
     const folders = await db
-      .select({ id: fsObjects.id, path: fsObjects.path })
+      .select({ path: fsObjects.path })
       .from(fsObjects)
       .where(inArray(fsObjects.id, folderIds));
 
     if (folders.length === 0) return 0;
-
-    const pathConditions = folders.map(f => isDescendantOf(fsObjects.path, f.path));
 
     const [result] = await db
       .select({ count: sql<number>`count(*)::int` })
@@ -731,7 +755,7 @@ export async function countFilesUnderFolders(folderIds: number[]): Promise<numbe
       .where(
         and(
           eq(fsObjects.type, "file"),
-          sql`(${sql.join(pathConditions, sql` OR `)})`
+          isDescendantOf(fsObjects.path, sql`ANY(ARRAY[${sql.join(folders.map(f => sql`${f.path}::ltree`), sql`, `)}])`)
         )
       );
 
