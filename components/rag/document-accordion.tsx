@@ -196,7 +196,7 @@ const PureDocumentAccordion = ({
 
                 <CollapsibleContent
                     id={`doc-content-${document.documentId}`}
-                    className="flex flex-col gap-2 p-3"
+                    className="px-3 pb-3"
                     style={{ width: "100%", maxWidth: "100%", overflow: "hidden" }}
                 >
                     {filteredChunks.length === 0 ? (
@@ -204,14 +204,16 @@ const PureDocumentAccordion = ({
                             לא נמצאו קטעים התואמים לסינון הנוכחי.
                         </p>
                     ) : (
-                        filteredChunks.map((chunk) => (
-                            <ChunkCard
-                                key={chunk.chunkId}
-                                chunk={chunk}
-                                docId={document.documentId}
-                                filterQuery={sidebarState.filterQuery}
-                            />
-                        ))
+                        <div className="rounded-xl bg-muted/30 p-3 flex flex-col gap-3">
+                            {filteredChunks.map((chunk) => (
+                                <ChunkCard
+                                    key={chunk.chunkId}
+                                    chunk={chunk}
+                                    docId={document.documentId}
+                                    filterQuery={sidebarState.filterQuery}
+                                />
+                            ))}
+                        </div>
                     )}
                 </CollapsibleContent>
             </Collapsible>

@@ -3,7 +3,6 @@
 import { ChevronDown, Copy, ExternalLink, ThumbsDown, ThumbsUp } from "lucide-react";
 import { memo, useState, type ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useRag } from "./rag-context";
 import {
@@ -51,18 +50,25 @@ const PureChunkCard = ({
     const textDirection = detectTextDirection(chunk.chunkContent);
 
     return (
-        <Card
+        <div
             className={cn(
-                "group relative transition-all duration-200 w-full max-w-full overflow-hidden border-0 shadow-none rounded-none",
-                chunk.isExpanded ? "h-auto" : "h-36",
-                isHovered && !chunk.isExpanded && "bg-accent/30",
+                // Base card styling - distinct index card appearance
+                "group relative transition-all duration-150 w-full max-w-full overflow-hidden",
+                "bg-card rounded-lg border shadow-sm",
+                // Hover effect
+                isHovered && "shadow-md border-primary/30",
+                // Expanded state - left accent bar
+                chunk.isExpanded && "border-l-2 border-l-primary bg-primary/5",
+                // Height constraint when collapsed
+                chunk.isExpanded ? "h-auto" : "h-32",
                 className
             )}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
             {...props}
         >
-            <CardHeader
+            {/* Header */}
+            <div
                 className={cn(
                     "flex flex-row-reverse items-center justify-between px-3 py-2 transition-opacity w-full max-w-full",
                     !chunk.isExpanded && !isHovered && "opacity-60"
@@ -141,9 +147,10 @@ const PureChunkCard = ({
                         </Button>
                     )}
                 </div>
-            </CardHeader>
+            </div>
 
-            <CardContent className="p-0">
+            {/* Content */}
+            <div className="p-0">
                 <button
                     type="button"
                     dir={textDirection}
@@ -189,8 +196,8 @@ const PureChunkCard = ({
                         </Button>
                     </div>
                 )}
-            </CardContent>
-        </Card>
+            </div>
+        </div>
     );
 };
 
