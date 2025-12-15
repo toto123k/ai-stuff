@@ -14,7 +14,7 @@ import {
     type RankedChunk,
 } from "./types";
 
-interface ChunkCardProps extends ComponentProps<typeof Card> {
+interface ChunkCardProps extends ComponentProps<"div"> {
     chunk: RankedChunk;
     docId: string;
     filterQuery?: string;
@@ -53,9 +53,9 @@ const PureChunkCard = ({
     return (
         <Card
             className={cn(
-                "group relative transition-all duration-200 w-full max-w-full overflow-hidden",
-                chunk.isExpanded ? "h-auto" : "h-32",
-                isHovered && !chunk.isExpanded && "shadow-md border-primary/20",
+                "group relative transition-all duration-200 w-full max-w-full overflow-hidden border-0 shadow-none rounded-none",
+                chunk.isExpanded ? "h-auto" : "h-36",
+                isHovered && !chunk.isExpanded && "bg-accent/30",
                 className
             )}
             onMouseEnter={() => setIsHovered(true)}
@@ -64,7 +64,7 @@ const PureChunkCard = ({
         >
             <CardHeader
                 className={cn(
-                    "flex flex-row-reverse items-center justify-between px-3 py-2 border-b transition-opacity w-full max-w-full",
+                    "flex flex-row-reverse items-center justify-between px-3 py-2 transition-opacity w-full max-w-full",
                     !chunk.isExpanded && !isHovered && "opacity-60"
                 )}
             >
@@ -144,7 +144,6 @@ const PureChunkCard = ({
             </CardHeader>
 
             <CardContent className="p-0">
-                {/* Content */}
                 <button
                     type="button"
                     dir={textDirection}

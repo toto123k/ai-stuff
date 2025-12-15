@@ -196,7 +196,7 @@ const PureDocumentAccordion = ({
 
                 <CollapsibleContent
                     id={`doc-content-${document.documentId}`}
-                    className="flex flex-col gap-2 px-3 pb-3"
+                    className="flex flex-col gap-2 p-3"
                     style={{ width: "100%", maxWidth: "100%", overflow: "hidden" }}
                 >
                     {filteredChunks.length === 0 ? (
