@@ -23,6 +23,7 @@ import { MessageActions } from "./message-actions";
 import { MessageEditor } from "./message-editor";
 import { MessageReasoning } from "./message-reasoning";
 import { PreviewAttachment } from "./preview-attachment";
+import { RagDisplay } from "./rag";
 import { Weather } from "./weather";
 
 const PurePreviewMessage = ({
@@ -264,6 +265,23 @@ const PurePreviewMessage = ({
                     )}
                   </ToolContent>
                 </Tool>
+              );
+            }
+            if (type === "tool-rag") {
+              const { toolCallId, state } = part;
+
+              return (
+                <div key={toolCallId} className="w-full">
+                  {state === "output-available" && part.output && (
+                    <RagDisplay result={part.output} />
+                  )}
+                  {state === "input-available" && (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                      Searching documents...
+                    </div>
+                  )}
+                </div>
               );
             }
 

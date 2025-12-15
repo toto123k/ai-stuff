@@ -1,9 +1,9 @@
 [
 {
     "id": "chat-model",
-    "name": "Grok Vision",
+    "name": "Deepseek",
     "description": "Advanced multimodal model with vision and text capabilities",
-    "slug": "x-ai/grok-2-vision-1212"
+    "slug": "deepseek/deepseek-v3.2"
   },
   {
     "id": "chat-model-reasoning",

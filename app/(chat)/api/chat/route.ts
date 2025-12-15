@@ -15,6 +15,7 @@ import type { ModelCatalog } from "tokenlens/core";
 import { fetchModels } from "tokenlens/fetch";
 import { getUsage } from "tokenlens/helpers";
 import { z } from "zod";
+import { ragSearch } from "@/lib/ai/tools/rag-search";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import type { VisibilityType } from "@/components/visibility-selector";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
@@ -70,18 +71,7 @@ export function getStreamContext() {
   return globalStreamContext;
 }
 
-const PositionSchema = z.object({
-  lat: z.number().finite().gte(-90).lte(90),
-  lon: z.number().finite().gte(-180).lte(180)
-});
 
-const LosParamsSchema = z.object({
-  positions: z.array(PositionSchema).min(2),
-  radius: z.number().finite().positive(),
-  height: z.number().finite().positive()
-});
-
-type LosParams = z.infer<typeof LosParamsSchema>;
 
 export async function POST(request: Request) {
   let requestBody: PostRequestBody;
@@ -151,65 +141,15 @@ export async function POST(request: Request) {
 
     let finalMergedUsage: AppUsage | undefined;
 
-    const rawInputBufferByToolCallId = new Map<string, string>();
-    const parsedInputByToolCallId = new Map<string, LosParams>();
-
     const stream = createUIMessageStream({
       execute: ({ writer: dataStream }) => {
-        const losTool = tool<unknown, any>({
-          description: "Evaluate line-of-sight feasibility along a path using positions, a radius, and a sensor height. Returns a stub.",
-          inputSchema: z.any(),
-          onInputStart: ({ toolCallId }) => {
-            rawInputBufferByToolCallId.set(toolCallId, "");
-            parsedInputByToolCallId.delete(toolCallId);
-          },
-          onInputDelta: ({ toolCallId, inputTextDelta }) => {
-            if (typeof inputTextDelta === "string") {
-              const current = rawInputBufferByToolCallId.get(toolCallId) ?? "";
-              rawInputBufferByToolCallId.set(toolCallId, current + inputTextDelta);
-            }
-          },
-          onInputAvailable: ({ toolCallId, input }) => {
-            const raw = typeof input === "string" ? input : rawInputBufferByToolCallId.get(toolCallId);
-            if (!raw) return;
-            if (raw.length > 256_000) return;
-            try {
-              const candidate = JSON.parse(raw);
-              const parsed = LosParamsSchema.safeParse(candidate);
-              if (parsed.success) parsedInputByToolCallId.set(toolCallId, parsed.data);
-            } catch {}
-          },
-          execute: async (input, ctx) => {
-            const hasStructured = input && typeof input === "object" && Object.keys(input as object).length > 0;
-            const resolved: LosParams = hasStructured
-              ? LosParamsSchema.parse(input)
-              : (() => {
-                  const key = ctx.toolCallId ?? Array.from(parsedInputByToolCallId.keys()).at(-1) ?? "";
-                  const fallback = parsedInputByToolCallId.get(key);
-                  if (!fallback) throw new Error("invalid_input");
-                  return fallback;
-                })();
-            const responseId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-            const pathLength = resolved.positions.length;
-            const start = resolved.positions[0];
-            const end = resolved.positions[pathLength - 1];
-            return {
-              id: responseId,
-              status: "stub",
-              summary: "LOS calculation placeholder",
-              input: resolved,
-              metadata: { pathLength, start, end, timestamp: new Date().toISOString() }
-            };
-          }
-        });
-
         const result = streamText({
           model: myProvider.languageModel(selectedChatModel),
           system: systemPrompt({ selectedChatModel, requestHints }),
           messages: convertToModelMessages(uiMessages),
           stopWhen: stepCountIs(5),
           experimental_transform: smoothStream({ chunking: "word" }),
-          tools: { los: losTool },
+          tools: { rag: ragSearch },
           experimental_telemetry: { isEnabled: isProductionEnvironment, functionId: "stream-text" },
           onFinish: async ({ usage }) => {
             try {
