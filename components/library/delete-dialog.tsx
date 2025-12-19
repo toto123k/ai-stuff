@@ -13,22 +13,34 @@ interface DeleteDialogProps {
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;
     onConfirm: () => void;
-    object: FSObject | null;
+    targets: FSObject[];
 }
 
 export const DeleteDialog = ({
     isOpen,
     onOpenChange,
     onConfirm,
-    object,
+    targets,
 }: DeleteDialogProps) => {
+    const count = targets.length;
+    const isSingle = count === 1;
+    const target = isSingle ? targets[0] : null;
+
+    const title = isSingle
+        ? `למחוק את ${target?.name}?`
+        : `למחוק ${count} פריטים?`;
+
+    const description = isSingle
+        ? `פעולה זו אינה ניתנת לביטול. היא תמחק לצמיתות את ה${target?.type === 'folder' ? 'תיקייה' : 'קובץ'} ואת תכולתו.`
+        : `פעולה זו אינה ניתנת לביטול. היא תמחק לצמיתות ${count} פריטים ואת תכולתם.`;
+
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
             <DialogContent dir="rtl">
                 <DialogHeader dir="rtl">
-                    <DialogTitle dir="rtl">למחוק את {object?.name}?</DialogTitle>
+                    <DialogTitle dir="rtl">{title}</DialogTitle>
                     <DialogDescription dir="rtl">
-                        פעולה זו אינה ניתנת לביטול. היא תמחק לצמיתות את ה{object?.type === 'folder' ? 'תיקייה' : 'קובץ'} ואת תכולתו.
+                        {description}
                     </DialogDescription>
                 </DialogHeader>
                 <DialogFooter>

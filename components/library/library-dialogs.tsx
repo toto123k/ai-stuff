@@ -1,14 +1,7 @@
 "use client";
 
 import { useAtom } from "jotai";
-import {
-    isCreateFolderOpenAtom,
-    isRenameOpenAtom,
-    isDeleteOpenAtom,
-    isShareOpenAtom,
-    isMetadataOpenAtom,
-    selectedObjectAtom,
-} from "@/lib/store/library-store";
+import { activeDialogAtom } from "@/lib/store/library-store";
 import { useFileOperations } from "./hooks/use-file-operations";
 import { CreateFolderDialog } from "./create-folder-dialog";
 import { RenameDialog } from "./rename-dialog";
@@ -17,47 +10,46 @@ import { ShareDialog } from "./share-dialog";
 import { MetadataDialog } from "./metadata-dialog";
 
 export function LibraryDialogs() {
-    const [isCreateFolderOpen, setIsCreateFolderOpen] = useAtom(isCreateFolderOpenAtom);
-    const [isRenameOpen, setIsRenameOpen] = useAtom(isRenameOpenAtom);
-    const [isDeleteOpen, setIsDeleteOpen] = useAtom(isDeleteOpenAtom);
-    const [isShareOpen, setIsShareOpen] = useAtom(isShareOpenAtom);
-    const [isMetadataOpen, setIsMetadataOpen] = useAtom(isMetadataOpenAtom);
-    const [selectedObject] = useAtom(selectedObjectAtom);
-
+    const [dialogState, setDialogState] = useAtom(activeDialogAtom);
     const { handleCreateFolder, handleRename, handleDelete } = useFileOperations();
+
+    const closeDialog = () => setDialogState(null);
+
+    // Get the first target for single-item dialogs
+    const target = dialogState?.targets[0] ?? null;
 
     return (
         <>
             <CreateFolderDialog
-                isOpen={isCreateFolderOpen}
-                onOpenChange={setIsCreateFolderOpen}
+                isOpen={dialogState?.type === "create-folder"}
+                onOpenChange={(open) => !open && closeDialog()}
                 onSubmit={handleCreateFolder}
             />
 
             <RenameDialog
-                isOpen={isRenameOpen}
-                onOpenChange={setIsRenameOpen}
-                onSubmit={handleRename}
-                object={selectedObject}
+                isOpen={dialogState?.type === "rename"}
+                onOpenChange={(open) => !open && closeDialog()}
+                onSubmit={(name) => handleRename(name, target)}
+                object={target}
             />
 
             <DeleteDialog
-                isOpen={isDeleteOpen}
-                onOpenChange={setIsDeleteOpen}
-                onConfirm={handleDelete}
-                object={selectedObject}
+                isOpen={dialogState?.type === "delete"}
+                onOpenChange={(open) => !open && closeDialog()}
+                onConfirm={() => handleDelete(dialogState?.targets ?? [])}
+                targets={dialogState?.targets ?? []}
             />
 
             <ShareDialog
-                isOpen={isShareOpen}
-                onClose={() => setIsShareOpen(false)}
-                item={selectedObject}
+                isOpen={dialogState?.type === "share"}
+                onClose={closeDialog}
+                item={target}
             />
 
             <MetadataDialog
-                isOpen={isMetadataOpen}
-                onOpenChange={setIsMetadataOpen}
-                item={selectedObject}
+                isOpen={dialogState?.type === "metadata"}
+                onOpenChange={(open) => !open && closeDialog()}
+                item={target}
             />
         </>
     );

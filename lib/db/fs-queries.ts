@@ -124,6 +124,101 @@ export async function doesPathExist(path: string): Promise<boolean> {
   return !!node;
 }
 
+/**
+ * Get the minimum permission level for a user across a set of objects and all their descendants.
+ * Returns null if any object or descendant has no permission.
+ */
+export async function getMinPermissionForObjects(
+  userId: string,
+  objectIds: number[]
+): Promise<PermType | null> {
+  if (objectIds.length === 0) return null;
+
+  try {
+    // Get all source objects and their descendants
+    const sourceObjects = await db
+      .select({ path: fsObjects.path })
+      .from(fsObjects)
+      .where(inArray(fsObjects.id, objectIds));
+
+    if (sourceObjects.length === 0) return null;
+
+    const sourcePaths = sourceObjects.map(s => s.path);
+
+    // Get all objects (sources + descendants)
+    const allObjects = await db
+      .select({
+        id: fsObjects.id,
+        permission: getEffectivePermissionSelect(userId, fsObjects),
+      })
+      .from(fsObjects)
+      .where(
+        sql`${fsObjects.path} <@ ANY(ARRAY[${sql.join(sourcePaths.map(p => sql`${p}::ltree`), sql`, `)}])`
+      );
+
+    if (allObjects.length === 0) return null;
+
+    // Find minimum permission
+    let minPermLevel: number | null = null;
+    for (const obj of allObjects) {
+      if (obj.permission === null) {
+        return null; // No permission on at least one object
+      }
+      const level = PERM_LEVELS[obj.permission];
+      if (minPermLevel === null || level < minPermLevel) {
+        minPermLevel = level;
+      }
+    }
+
+    // Convert back to permission type
+    if (minPermLevel === null) return null;
+    const permTypes = Object.entries(PERM_LEVELS);
+    const found = permTypes.find(([_, level]) => level === minPermLevel);
+    return found ? found[0] as PermType : null;
+  } catch (error) {
+    console.error("Failed to get min permission", error);
+    return null;
+  }
+}
+
+/**
+ * Extract root ID from a path (the first segment)
+ */
+export function getRootIdFromPath(path: string): number {
+  const parts = path.split(".");
+  return parseInt(parts[0], 10);
+}
+
+/**
+ * Check if an object is a root folder (registered in fs_roots)
+ */
+export async function isRootFolder(objectId: number): Promise<boolean> {
+  const [root] = await db
+    .select({ id: fsRoots.id })
+    .from(fsRoots)
+    .where(eq(fsRoots.rootFolderId, objectId));
+  return !!root;
+}
+
+/**
+ * Check if all objects are in the same root
+ */
+export async function getObjectsRoots(objectIds: number[]): Promise<Map<number, number>> {
+  if (objectIds.length === 0) return new Map();
+
+  const objects = await db
+    .select({ id: fsObjects.id, path: fsObjects.path })
+    .from(fsObjects)
+    .where(inArray(fsObjects.id, objectIds));
+
+  const rootMap = new Map<number, number>();
+  for (const obj of objects) {
+    rootMap.set(obj.id, getRootIdFromPath(obj.path));
+  }
+  return rootMap;
+}
+
+
 export async function createCollectionRoot(
   ownerId: string,
   type: RootType
@@ -763,5 +858,261 @@ export async function countFilesUnderFolders(folderIds: number[]): Promise<numbe
   } catch (error) {
     console.error("Failed to count files", error);
     return 0;
+  }
+}
+
+/**
+ * Copy objects to a target folder.
+ * Uses topological ordering (ancestors first) to correctly map parent IDs.
+ * 
+ * @param sourceIds - Array of object IDs to copy
+ * @param targetFolderId - The folder to copy into
+ * @param userId - The user performing the copy
+ * @returns The number of objects copied
+ */
+export async function copyObjects(
+  sourceIds: number[],
+  targetFolderId: number,
+  userId: string
+): Promise<{ copiedCount: number }> {
+  if (sourceIds.length === 0) {
+    return { copiedCount: 0 };
+  }
+
+  // Check write permission on target folder
+  const targetPerm = await getEffectivePermission(userId, targetFolderId);
+  if (!targetPerm || PERM_LEVELS[targetPerm] < PERM_LEVELS.write) {
+    throw new ChatSDKError("forbidden:database", "Insufficient permissions on target folder");
+  }
+
+  // Get roots for all objects (sources + target)
+  const allIds = [...sourceIds, targetFolderId];
+  const rootsMap = await getObjectsRoots(allIds);
+  const targetRootId = rootsMap.get(targetFolderId);
+
+  // Validate: can't copy root folders
+  for (const id of sourceIds) {
+    if (await isRootFolder(id)) {
+      throw new ChatSDKError("bad_request:database", "Cannot copy root folders");
+    }
+  }
+
+  // Validate: all sources must be in the same root as target
+  for (const id of sourceIds) {
+    const sourceRootId = rootsMap.get(id);
+    if (sourceRootId !== targetRootId) {
+      throw new ChatSDKError("bad_request:database", "Cannot copy between different collection roots");
+    }
+  }
+
+  // Check read permission on all source objects AND their descendants
+  const minPerm = await getMinPermissionForObjects(userId, sourceIds);
+  if (!minPerm || PERM_LEVELS[minPerm] < PERM_LEVELS.read) {
+    throw new ChatSDKError("forbidden:database", "Insufficient permissions on source objects or their contents");
+  }
+
+  try {
+    return await db.transaction(async (tx) => {
+      // Get target folder path
+      const [targetFolder] = await tx
+        .select({ path: fsObjects.path })
+        .from(fsObjects)
+        .where(eq(fsObjects.id, targetFolderId));
+
+      if (!targetFolder) {
+        throw new Error("Target folder not found");
+      }
+
+      // Fetch all source objects and their descendants
+      // We need to get all objects where path <@ any of the source paths
+      const sourceObjects = await tx
+        .select({ id: fsObjects.id, path: fsObjects.path })
+        .from(fsObjects)
+        .where(inArray(fsObjects.id, sourceIds));
+
+      if (sourceObjects.length === 0) {
+        return { copiedCount: 0 };
+      }
+
+      // Build array of source paths for the descendant query
+      const sourcePaths = sourceObjects.map(s => s.path);
+
+      // Fetch all objects to copy (sources + descendants), sorted by path depth
+      const allObjectsToCopy = await tx
+        .select({
+          id: fsObjects.id,
+          name: fsObjects.name,
+          type: fsObjects.type,
+          path: fsObjects.path,
+          level: nlevel(fsObjects.path),
+        })
+        .from(fsObjects)
+        .where(
+          sql`${fsObjects.path} <@ ANY(ARRAY[${sql.join(sourcePaths.map(p => sql`${p}::ltree`), sql`, `)}])`
+        )
+        .orderBy(nlevel(fsObjects.path)); // Ancestors first!
+
+      // Track oldId -> { newId, newPath }
+      const idMapping = new Map<number, { newId: number; newPath: string }>();
+
+      // Process in depth order
+      for (const obj of allObjectsToCopy) {
+        // Insert new object with temporary path
+        const [newObj] = await tx
+          .insert(fsObjects)
+          .values({
+            name: obj.name,
+            type: obj.type,
+            path: "0", // Temporary
+          })
+          .returning({ id: fsObjects.id });
+
+        // Calculate new path
+        let newPath: string;
+
+        // Check if this is a top-level source object
+        if (sourceIds.includes(obj.id)) {
+          // Top-level: goes directly under target folder
+          newPath = `${targetFolder.path}.${newObj.id}`;
+        } else {
+          // Descendant: find old parent and lookup new parent from mapping
+          const pathParts = obj.path.split(".");
+          const oldParentId = parseInt(pathParts[pathParts.length - 2]);
+          const newParent = idMapping.get(oldParentId);
+
+          if (!newParent) {
+            throw new Error(`Parent ${oldParentId} not found in mapping - this shouldn't happen`);
+          }
+
+          newPath = `${newParent.newPath}.${newObj.id}`;
+        }
+
+        // Update path
+        await tx
+          .update(fsObjects)
+          .set({ path: newPath })
+          .where(eq(fsObjects.id, newObj.id));
+
+        // Store mapping
+        idMapping.set(obj.id, { newId: newObj.id, newPath });
+      }
+
+      return { copiedCount: allObjectsToCopy.length };
+    });
+  } catch (error) {
+    console.error("Failed to copy objects", error);
+    throw new ChatSDKError("bad_request:database", "Failed to copy objects");
+  }
+}
+
+
+/**
+ * Move objects to a target folder.
+ * Only moves the top-level source objects; their descendants are automatically
+ * moved by updating the ltree path prefix.
+ * 
+ * @param sourceIds - Array of object IDs to move
+ * @param targetFolderId - The folder to move into
+ * @param userId - The user performing the move
+ * @returns The number of objects moved
+ */
+export async function moveObjects(
+  sourceIds: number[],
+  targetFolderId: number,
+  userId: string
+): Promise<{ movedCount: number }> {
+  if (sourceIds.length === 0) {
+    return { movedCount: 0 };
+  }
+
+  // Check write permission on target folder
+  const targetPerm = await getEffectivePermission(userId, targetFolderId);
+  if (!targetPerm || PERM_LEVELS[targetPerm] < PERM_LEVELS.write) {
+    throw new ChatSDKError("forbidden:database", "Insufficient permissions on target folder");
+  }
+
+  // Get roots for all objects (sources + target)
+  const allIds = [...sourceIds, targetFolderId];
+  const rootsMap = await getObjectsRoots(allIds);
+  const targetRootId = rootsMap.get(targetFolderId);
+
+  // Validate: can't move root folders
+  for (const id of sourceIds) {
+    if (await isRootFolder(id)) {
+      throw new ChatSDKError("bad_request:database", "Cannot move root folders");
+    }
+  }
+
+  // Validate: all sources must be in the same root as target
+  for (const id of sourceIds) {
+    const sourceRootId = rootsMap.get(id);
+    if (sourceRootId !== targetRootId) {
+      throw new ChatSDKError("bad_request:database", "Cannot move between different collection roots");
+    }
+  }
+
+  // Check write permission on all source objects AND their descendants
+  const minPerm = await getMinPermissionForObjects(userId, sourceIds);
+  if (!minPerm || PERM_LEVELS[minPerm] < PERM_LEVELS.write) {
+    throw new ChatSDKError("forbidden:database", "Insufficient permissions on source objects or their contents");
+  }
+
+  try {
+    return await db.transaction(async (tx) => {
+      // Get target folder path
+      const [targetFolder] = await tx
+        .select({ path: fsObjects.path })
+        .from(fsObjects)
+        .where(eq(fsObjects.id, targetFolderId));
+
+      if (!targetFolder) {
+        throw new Error("Target folder not found");
+      }
+
+      // Get all source objects
+      const sourceObjects = await tx
+        .select({
+          id: fsObjects.id,
+          path: fsObjects.path,
+          name: fsObjects.name
+        })
+        .from(fsObjects)
+        .where(inArray(fsObjects.id, sourceIds));
+
+      if (sourceObjects.length === 0) {
+        return { movedCount: 0 };
+      }
+
+      // Move each source object and its descendants
+      for (const obj of sourceObjects) {
+        const oldPath = obj.path;
+        const newPath = buildChildPath(targetFolder.path, obj.id);
+
+        // Update the source object's path
+        await tx
+          .update(fsObjects)
+          .set({ path: newPath })
+          .where(eq(fsObjects.id, obj.id));
+
+        // Update all descendants' paths
+        // Replace the old prefix with the new prefix
+        await tx
+          .update(fsObjects)
+          .set({
+            path: sql`${ltreeConcat(ltreeCast(newPath), subpath(fsObjects.path, nlevel(oldPath)))}`
+          })
+          .where(
+            and(
+              isDescendantOf(fsObjects.path, oldPath),
+              ne(fsObjects.id, obj.id)
+            )
+          );
+      }
+
+      return { movedCount: sourceObjects.length };
+    });
+  } catch (error) {
+    console.error("Failed to move objects", error);
+    throw new ChatSDKError("bad_request:database", "Failed to move objects");
   }
 }

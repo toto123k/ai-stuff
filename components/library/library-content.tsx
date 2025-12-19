@@ -1,7 +1,7 @@
 "use client";
 
-import { LoaderIcon, UploadIcon, PlusIcon, BanIcon } from "lucide-react";
-import { useSetAtom, useAtomValue } from "jotai";
+import { LoaderIcon, UploadIcon, PlusIcon, BanIcon, ClipboardPasteIcon } from "lucide-react";
+import { useAtomValue } from "jotai";
 import {
     ContextMenu,
     ContextMenuContent,
@@ -11,8 +11,8 @@ import {
 import { FoldersGrid } from "./folders-grid";
 import { FilesTable } from "./files-table";
 import {
-    isCreateFolderOpenAtom,
     isReadOnlyRootAtom,
+    canPasteAtom,
 } from "@/lib/store/library-store";
 import { useLibraryData } from "./hooks/use-library-data";
 import { useLibraryNavigation } from "./hooks/use-library-navigation";
@@ -21,13 +21,14 @@ import { useFileOperations } from "./hooks/use-file-operations";
 
 export function LibraryContent() {
     const isReadOnlyRoot = useAtomValue(isReadOnlyRootAtom);
-    const setIsCreateFolderOpen = useSetAtom(isCreateFolderOpenAtom);
 
     const { folders, files, isLoading } = useLibraryData();
     const { handleNavigate } = useLibraryNavigation();
     const { fileInputRef, onDrop, getRootProps, getInputProps, isDragActive } =
         useFileUpload();
-    const { actions } = useFileOperations();
+    const { actions, openDialog } = useFileOperations();
+
+    const canPaste = useAtomValue(canPasteAtom);
 
     return (
         <div className="flex flex-col h-full" {...getRootProps()}>
@@ -79,8 +80,11 @@ export function LibraryContent() {
                             <ContextMenuItem onClick={() => fileInputRef.current?.click()}>
                                 <UploadIcon className="w-4 h-4 ml-2" /> העלה קובץ
                             </ContextMenuItem>
-                            <ContextMenuItem onClick={() => setIsCreateFolderOpen(true)}>
+                            <ContextMenuItem onClick={() => openDialog("create-folder")}>
                                 <PlusIcon className="w-4 h-4 ml-2" /> צור תיקייה חדשה
+                            </ContextMenuItem>
+                            <ContextMenuItem onClick={() => actions.onPaste(null)} disabled={!canPaste}>
+                                <ClipboardPasteIcon className="w-4 h-4 ml-2" /> הדבק
                             </ContextMenuItem>
                         </>
                     ) : (

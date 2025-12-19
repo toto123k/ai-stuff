@@ -1,8 +1,8 @@
 "use client";
 
-import { createContext, useContext, useMemo, useEffect, ReactNode, RefObject } from "react";
+import { createContext, useContext, useMemo, useEffect, ReactNode, RefObject, memo, useCallback } from "react";
 import { UploadIcon, ArrowUpDown, ArrowUp, ArrowDown, FileIcon } from "lucide-react";
-import { useAtomValue, useSetAtom } from "jotai";
+import { useAtom, useAtomValue, useSetAtom, useStore } from "jotai";
 import {
     useReactTable,
     getCoreRowModel,
@@ -28,13 +28,14 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { FSObject, FSObjectActions } from "./types";
 import { FileRow } from "./file-row";
-import { selectedFileIdsAtom } from "@/lib/store/library-store";
+import { fsObjectStatesAtom, FSObjectState } from "@/lib/store/library-store";
 
 interface FilesTableContextValue {
     table: TanstackTable<FSObject>;
     actions: FSObjectActions;
     allFileIds: number[];
     fileInputRef: RefObject<HTMLInputElement>;
+    getSelectedFSObjects: () => FSObject[];
 }
 
 const FilesTableContext = createContext<FilesTableContextValue | null>(null);
@@ -56,13 +57,25 @@ interface RootProps {
 
 function Root({ files, actions, fileInputRef, children }: RootProps) {
     const [sorting, setSorting] = useState<SortingState>([]);
-    const setSelectedIds = useSetAtom(selectedFileIdsAtom);
+    const setStates = useSetAtom(fsObjectStatesAtom);
 
     const allFileIds = useMemo(() => files.map(f => f.id), [files]);
 
     useEffect(() => {
-        setSelectedIds(new Set());
-    }, [allFileIds.join(","), setSelectedIds]);
+        // Clear only selection states, preserve copy/cut states
+        setStates((prev) => {
+            const next = new Map<number, Set<FSObjectState>>();
+            prev.forEach((state, id) => {
+                const preserved = new Set<FSObjectState>();
+                if (state.has("copy")) preserved.add("copy");
+                if (state.has("cut")) preserved.add("cut");
+                if (preserved.size > 0) {
+                    next.set(id, preserved);
+                }
+            });
+            return next;
+        });
+    }, [allFileIds.join(","), setStates]);
 
     const columns = useMemo<ColumnDef<FSObject>[]>(() => [
         {
@@ -113,12 +126,26 @@ function Root({ files, actions, fileInputRef, children }: RootProps) {
         getSortedRowModel: getSortedRowModel(),
     });
 
+    const store = useStore();
+
+    const getSelectedFSObjects = useCallback(() => {
+        const states = store.get(fsObjectStatesAtom);
+        const selectedIds: number[] = [];
+        states.forEach((state, id) => {
+            if (state.has("selected")) {
+                selectedIds.push(id);
+            }
+        });
+        return files.filter(f => selectedIds.includes(f.id));
+    }, [store, files]);
+
     const contextValue = useMemo(() => ({
         table,
         actions,
         allFileIds,
         fileInputRef,
-    }), [table, actions, allFileIds, fileInputRef]);
+        getSelectedFSObjects,
+    }), [table, actions, allFileIds, fileInputRef, getSelectedFSObjects]);
 
     return (
         <FilesTableContext.Provider value={contextValue}>
@@ -159,20 +186,40 @@ interface HeaderProps {
     className?: string;
 }
 
-function HeaderComponent({ className }: HeaderProps) {
+const HeaderComponent = memo(({ className }: HeaderProps) => {
     const { table, allFileIds } = useFilesTableContext();
-    const selectedIds = useAtomValue(selectedFileIdsAtom);
-    const setSelectedIds = useSetAtom(selectedFileIdsAtom);
+    const [objectStates, setObjectStates] = useAtom(fsObjectStatesAtom);
 
-    const isAllSelected = allFileIds.length > 0 && selectedIds.size === allFileIds.length;
-    const isPartiallySelected = selectedIds.size > 0 && selectedIds.size < allFileIds.length;
+    const selectedCount = allFileIds.filter(id => objectStates.get(id)?.has("selected")).length;
+    const isAllSelected = allFileIds.length > 0 && selectedCount === allFileIds.length;
+    const isPartiallySelected = selectedCount > 0 && selectedCount < allFileIds.length;
 
     const handleToggleAll = () => {
-        if (isAllSelected) {
-            setSelectedIds(new Set());
-        } else {
-            setSelectedIds(new Set(allFileIds));
-        }
+        setObjectStates((prev) => {
+            const next = new Map(prev);
+            if (isAllSelected) {
+                allFileIds.forEach((id) => {
+                    const currentState = next.get(id) || new Set();
+                    if (currentState.has("selected")) {
+                        const nextState = new Set(currentState);
+                        nextState.delete("selected");
+                        if (nextState.size === 0) {
+                            next.delete(id);
+                        } else {
+                            next.set(id, nextState);
+                        }
+                    }
+                });
+            } else {
+                allFileIds.forEach((id) => {
+                    const currentState = next.get(id) || new Set();
+                    const nextState = new Set(currentState);
+                    nextState.add("selected");
+                    next.set(id, nextState);
+                });
+            }
+            return next;
+        });
     };
 
     return (
@@ -214,14 +261,16 @@ function HeaderComponent({ className }: HeaderProps) {
             </TableRow>
         </TableHeader>
     );
-}
+});
+
+HeaderComponent.displayName = "FilesTable.Header";
 
 interface BodyProps {
     className?: string;
 }
 
 function Body({ className }: BodyProps) {
-    const { table, actions, allFileIds } = useFilesTableContext();
+    const { table, actions, allFileIds, getSelectedFSObjects } = useFilesTableContext();
     const rows = table.getRowModel().rows;
 
     return (
@@ -233,6 +282,7 @@ function Body({ className }: BodyProps) {
                         file={row.original}
                         allFileIds={allFileIds}
                         actions={actions}
+                        getSelectedFSObjects={getSelectedFSObjects}
                     >
                         {row.getVisibleCells().map((cell) => (
                             <FileRow.Cell key={cell.id}>
@@ -274,14 +324,18 @@ interface CountProps {
 
 function Count({ className }: CountProps) {
     const { allFileIds } = useFilesTableContext();
-    const selectedIds = useAtomValue(selectedFileIdsAtom);
+    const objectStates = useAtomValue(fsObjectStatesAtom);
+
+    // Calculate how many files (from the current view) are selected
+    // We filter by allFileIds to generic correct count for the current folder view
+    const selectedCount = allFileIds.filter(id => objectStates.get(id)?.has("selected")).length;
 
     return (
         <h3 className={cn("text-sm font-medium text-muted-foreground", className)}>
             קבצים ({allFileIds.length})
-            {selectedIds.size > 0 && (
+            {selectedCount > 0 && (
                 <span className="mr-2 text-primary">
-                    • {selectedIds.size} נבחרו
+                    • {selectedCount} נבחרו
                 </span>
             )}
         </h3>

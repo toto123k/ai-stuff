@@ -12,7 +12,8 @@ export type FSObject = {
 
 export type FSObjectActions = {
   onRename: (obj: FSObject) => void;
-  onDelete: (obj: FSObject) => void;
+  onDelete: (obj: FSObject, allSelected: FSObject[]) => void;
   onShare: (obj: FSObject) => void;
   onViewDetails: (obj: FSObject) => void;
+  onPaste: (obj: FSObject | null) => void;
 };

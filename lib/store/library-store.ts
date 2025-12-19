@@ -31,21 +31,44 @@ export const currentMutateKeyAtom = atom((get) => {
                 : "/api/fs/org";
 });
 
-// Dialog State Atoms
-export const isCreateFolderOpenAtom = atom(false);
-export const isRenameOpenAtom = atom(false);
-export const isDeleteOpenAtom = atom(false);
-export const isShareOpenAtom = atom(false);
-export const isMetadataOpenAtom = atom(false);
-
-// Selection & Operation Atoms
-export const selectedObjectAtom = atom<FSObject | null>(null);
+// Dialog State - combines dialog type and target object(s)
+export type LibraryDialogType = "create-folder" | "rename" | "delete" | "share" | "metadata";
+export interface DialogState {
+    type: LibraryDialogType;
+    targets: FSObject[]; // Object(s) the dialog operates on
+}
+export const activeDialogAtom = atom<DialogState | null>(null);
 
 // File selection atoms
-export const selectedFileIdsAtom = atom(new Set<number>());
+// File selection & state atoms
+export type FSObjectState = "selected" | "copy" | "cut";
+export const fsObjectStatesAtom = atom<Map<number, Set<FSObjectState>>>(new Map());
 export const lastClickedFileIdAtom = atom<number | null>(null);
 
-// Creates a stable derived atom for a specific file's selection state
-// Only re-renders when THIS file's selection changes
-export const createFileSelectedAtom = (id: number) =>
-    selectAtom(selectedFileIdsAtom, (ids) => ids.has(id));
+// Creates a stable derived atom for a specific file's state
+// Derived atom to check if any file has "copy" or "cut" state
+// This returns a boolean and only triggers updates when the boolean value changes
+export const canPasteAtom = selectAtom(fsObjectStatesAtom, (states) => {
+    for (const state of states.values()) {
+        if (state.has("copy") || state.has("cut")) {
+            return true;
+        }
+    }
+    return false;
+});
+
+// Custom equality function for Set comparison
+const setEquals = <T>(a: Set<T>, b: Set<T>): boolean => {
+    if (a.size !== b.size) return false;
+    for (const item of a) {
+        if (!b.has(item)) return false;
+    }
+    return true;
+};
+
+export const createFSObjectStateAtom = (id: number) =>
+    selectAtom(
+        fsObjectStatesAtom,
+        (states) => states.get(id) ?? new Set<FSObjectState>(),
+        setEquals
+    );
