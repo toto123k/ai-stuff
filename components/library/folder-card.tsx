@@ -67,6 +67,7 @@ export const FolderCard = ({ folder, onNavigate, actions }: FolderCardProps) => 
     };
 
     const handleClick = (e: React.MouseEvent) => {
+        e.stopPropagation(); // Prevent deselection from background click
         if (!hasAccess) return;
 
         if (e.ctrlKey || e.metaKey) {

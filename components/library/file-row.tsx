@@ -47,6 +47,7 @@ const Root = memo(({ file, allFileIds, actions, children }: RootProps) => {
     const store = useStore();
 
     const handleRowClick = useCallback((e: React.MouseEvent) => {
+        e.stopPropagation(); // Prevent deselection from background click
         if (isAccessDenied) return;
 
         const lastClickedId = store.get(lastClickedFileIdAtom);

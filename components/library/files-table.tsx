@@ -130,7 +130,7 @@ function Root({ files, actions, fileInputRef, children }: RootProps) {
         actions,
         allFileIds,
         fileInputRef,
-    }), [table, actions, allFileIds, fileInputRef]);
+    }), [table, actions, allFileIds, fileInputRef, sorting]);
 
     return (
         <FilesTableContext.Provider value={contextValue}>
@@ -153,7 +153,10 @@ function SortButton({ column, children }: SortButtonProps) {
         <Button
             variant="ghost"
             className="p-0 h-auto font-medium hover:bg-transparent"
-            onClick={() => column.toggleSorting(sorted === "asc")}
+            onClick={(e) => {
+                e.stopPropagation();
+                column.toggleSorting(sorted === "asc");
+            }}
         >
             {children}
             {sorted === "asc" ? (
@@ -211,7 +214,10 @@ const HeaderComponent = memo(({ className }: HeaderProps) => {
         <TableHeader className={className}>
             <TableRow className="hover:bg-transparent">
                 <TableHead className="w-12 px-4">
-                    <div className="flex items-center justify-center">
+                    <div
+                        className="flex items-center justify-center"
+                        onClick={(e) => e.stopPropagation()}
+                    >
                         <Checkbox
                             checked={isAllSelected}
                             ref={(el) => {
