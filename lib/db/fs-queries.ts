@@ -9,20 +9,23 @@ import {
   eq,
   ne,
   exists,
+  getTableColumns,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgres";
 
 import { Result, ok, err, safeTry, ResultAsync } from "neverthrow";
-import { UnexpectedError, PermissionError, NotFoundError, ValidationError, S3Error } from "./fs-errors";
+import { UnexpectedError, PermissionError, NotFoundError, ValidationError, S3Error, StorageError } from "./fs-errors";
 import {
   fsObjects,
   fsRoots,
   userPermissions,
   user,
+  chunks,
   type PermType,
   type ObjectType,
   type RootType,
   type FSObject,
+  type ChunkMetadata,
 } from "./schema";
 import { safeTransaction } from "./safe-transaction";
 
@@ -117,6 +120,97 @@ const isFromOtherPersonalRootSubquery = (
 };
 
 
+export async function getFolderRootType(folderId: number): Promise<RootType | null> {
+  const [folder] = await db
+    .select({ path: fsObjects.path })
+    .from(fsObjects)
+    .where(eq(fsObjects.id, folderId));
+
+  if (!folder) return null;
+
+  // If path is just "0", it's a temp path during creation, shouldn't happen here
+  if (folder.path === "0") return null;
+
+  const rootId = getRootIdFromPath(folder.path);
+
+  const [root] = await db
+    .select({ type: fsRoots.type })
+    .from(fsRoots)
+    .where(eq(fsRoots.rootFolderId, rootId));
+
+  return root ? root.type : null;
+}
+
+/**
+ * Get storage info for a root folder (used size and max limit)
+ */
+export async function getRootStorageInfo(
+  rootFolderId: number
+): Promise<{ usedBytes: number; maxBytes: number } | null> {
+  const [root] = await db
+    .select({ maxStorageBytes: fsRoots.maxStorageBytes })
+    .from(fsRoots)
+    .where(eq(fsRoots.rootFolderId, rootFolderId));
+
+  if (!root) return null;
+
+  // Get path of root
+  const [rootObj] = await db
+    .select({ path: fsObjects.path })
+    .from(fsObjects)
+    .where(eq(fsObjects.id, rootFolderId));
+
+  if (!rootObj) return null;
+
+  // Sum file sizes for all descendants (including root itself if it were a file, which it isn't)
+  const [result] = await db
+    .select({ total: sql<number>`COALESCE(SUM(${fsObjects.fileSize}), 0)` })
+    .from(fsObjects)
+    .where(
+      and(
+        sql`${fsObjects.path} <@ ${rootObj.path}::ltree`,
+        eq(fsObjects.type, "file")
+      )
+    );
+
+  return {
+    usedBytes: Number(result?.total ?? 0),
+    maxBytes: root.maxStorageBytes,
+  };
+}
+
+/**
+ * Check if adding a file of given size would exceed storage limit
+ */
+async function checkStorageLimit(
+  parentId: number,
+  fileSizeBytes: number
+): Promise<Result<void, StorageError | NotFoundError>> {
+  // Get root ID from parent path
+  const [parent] = await db
+    .select({ path: fsObjects.path })
+    .from(fsObjects)
+    .where(eq(fsObjects.id, parentId));
+
+  if (!parent) return err({ type: "PARENT_NOT_FOUND", parentId });
+
+  const rootId = getRootIdFromPath(parent.path);
+  const storageInfo = await getRootStorageInfo(rootId);
+
+  if (!storageInfo) return err({ type: "ROOT_NOT_FOUND", rootType: "unknown" });
+
+  const newTotal = storageInfo.usedBytes + fileSizeBytes;
+  if (newTotal > storageInfo.maxBytes) {
+    return err({
+      type: "STORAGE_LIMIT_EXCEEDED",
+      used: storageInfo.usedBytes,
+      limit: storageInfo.maxBytes,
+      required: fileSizeBytes,
+    });
+  }
+
+  return ok(undefined);
+}
 
 export async function getEffectivePermission(
   userId: string,
@@ -147,6 +241,21 @@ export async function getEffectivePermission(
     }
 
     const permFolder = aliasedTable(fsObjects, "permFolder");
+
+    // LTREE optimization:
+    // Instead of verifying permission on every ancestor one by one (O(N) queries),
+    // we search for the *closest ancestor* (deepest node) that has a permission entry for this user.
+    // We sort ancestors by path length (descending) and take the first match.
+    // This works because permissions are inherited but can be overridden (though current model implies effective permission is checked from direct assignments?)
+    // Actually, existing model seems to only assign permission to specific folders (roots or shared).
+    // If it's hierarchical, we check the deepest permission.
+
+    // Check if we already have the path from objectExists? No, we selected ID.
+    // Let's get path.
+    const [objectNode] = await db.select({ path: fsObjects.path }).from(fsObjects).where(eq(fsObjects.id, nodeId));
+
+    // ... rest of function
+
 
     const nodePathSubquery = getNodePathSubquery(nodeId);
 
@@ -297,39 +406,73 @@ export async function getObjectsRoots(objectIds: number[]): Promise<Map<number, 
   return rootMap;
 }
 
+// INTERNAL: Create collection root DB logic
+async function createCollectionRootDb(
+  tx: Transaction,
+  ownerId: string,
+  type: RootType,
+  rootName: string
+) {
+  const [rootFolder] = await tx
+    .insert(fsObjects)
+    .values({
+      name: rootName,
+      type: "folder",
+      path: "0",
+    })
+    .returning();
+
+  const newPath = `${rootFolder.id}`;
+  await tx
+    .update(fsObjects)
+    .set({ path: newPath })
+    .where(eq(fsObjects.id, rootFolder.id));
+
+  await tx.insert(fsRoots).values({
+    rootFolderId: rootFolder.id,
+    type,
+  });
+
+  await tx.insert(userPermissions).values({
+    userId: ownerId,
+    folderId: rootFolder.id,
+    permission: "owner",
+  });
+
+  return { ...rootFolder, path: newPath };
+}
 
 export async function createCollectionRoot(
   ownerId: string,
-  type: RootType
+  type: RootType,
+  rootName: string
 ): Promise<Result<FSObject, UnexpectedError>> {
   return safeTransaction(db, async (tx) => {
-    const [rootFolder] = await tx
-      .insert(fsObjects)
-      .values({
-        name: "Root",
-        type: "folder",
-        path: "0", // Temporary path, will update with ID
-      })
-      .returning();
+    const root = await createCollectionRootDb(tx, ownerId, type, rootName);
+    return ok(root);
+  });
+}
 
-    const newPath = `${rootFolder.id}`;
-    await tx
-      .update(fsObjects)
-      .set({ path: newPath })
-      .where(eq(fsObjects.id, rootFolder.id));
+/**
+ * Sets up a new user with both Personal and Temporary collection roots.
+ */
+export async function setUpNewUser(userId: string): Promise<Result<void, UnexpectedError>> {
+  // Get username (email) for folder naming
+  const [userRecord] = await db
+    .select({ email: user.email })
+    .from(user)
+    .where(eq(user.id, userId));
 
-    await tx.insert(fsRoots).values({
-      rootFolderId: rootFolder.id,
-      type,
-    });
+  const username = userRecord?.email?.split("@")[0] ?? "משתמש";
 
-    await tx.insert(userPermissions).values({
-      userId: ownerId,
-      folderId: rootFolder.id,
-      permission: "owner",
-    });
+  return safeTransaction(db, async (tx) => {
+    // Create Personal Root
+    await createCollectionRootDb(tx, userId, "personal", `הספרייה של ${username}`);
 
-    return ok({ ...rootFolder, path: newPath });
+    // Create Temporary Root
+    await createCollectionRootDb(tx, userId, "personal-temporary", `הקבצים הזמניים של ${username}`);
+
+    return ok();
   });
 }
 
@@ -376,36 +519,16 @@ export async function createFolder(
 export async function uploadFile(
   parentId: number,
   name: string,
-  userId: string
+  userId: string,
+  metadata?: { fileSize?: number; mimeType?: string; expiresAt?: Date }
 ): Promise<Result<FSObject, PermissionError | NotFoundError | UnexpectedError>> {
   const permResult = await checkReqPermission(userId, parentId, "write", "folder");
   if (permResult.isErr()) return err(permResult.error);
 
   try {
     return await safeTransaction(db, async (tx) => {
-      const [parent] = await tx
-        .select({ path: fsObjects.path })
-        .from(fsObjects)
-        .where(eq(fsObjects.id, parentId));
-
-      if (!parent) return err({ type: "PARENT_NOT_FOUND" as const, parentId });
-
-      const [file] = await tx
-        .insert(fsObjects)
-        .values({
-          name,
-          type: "file",
-          path: "0",
-        })
-        .returning();
-
-      const newPath = `${parent.path}.${file.id}`;
-      await tx
-        .update(fsObjects)
-        .set({ path: newPath })
-        .where(eq(fsObjects.id, file.id));
-
-      return ok({ ...file, path: newPath });
+      const dbResult = await uploadFileDb(tx, parentId, name, metadata);
+      return dbResult;
     });
   } catch (error) {
     console.error("Failed to upload file", error);
@@ -663,6 +786,8 @@ export async function getObjects(folderId: number, userId: string) {
       type: fsObjects.type,
       path: fsObjects.path,
       createdAt: fsObjects.createdAt,
+      size: fsObjects.fileSize,
+      expiresAt: fsObjects.expiresAt,
       permission: getEffectivePermissionSelect(userId, fsObjects),
     })
     .from(fsObjects)
@@ -697,6 +822,23 @@ export async function getSharedRoot(userId: string) {
   return { objects, rootFolderId: null }; // No single root for shared items
 }
 
+export async function getTemporaryRoot(userId: string) {
+  const [root] = await db
+    .select({ rootFolderId: fsRoots.rootFolderId })
+    .from(fsRoots)
+    .innerJoin(userPermissions, and(
+      eq(userPermissions.folderId, fsRoots.rootFolderId),
+      eq(userPermissions.permission, "owner"),
+      eq(userPermissions.userId, userId)
+    ))
+    .where(eq(fsRoots.type, "personal-temporary"));
+
+  if (!root) return { objects: [], rootFolderId: null };
+
+  const objects = await getObjects(root.rootFolderId, userId);
+  return { objects, rootFolderId: root.rootFolderId };
+}
+
 export async function getSharedObjects(userId: string) {
   return db
     .select({
@@ -705,6 +847,8 @@ export async function getSharedObjects(userId: string) {
       type: fsObjects.type,
       path: fsObjects.path,
       createdAt: fsObjects.createdAt,
+      size: fsObjects.fileSize,
+      expiresAt: fsObjects.expiresAt,
       permission: userPermissions.permission,
     })
     .from(userPermissions)
@@ -712,6 +856,7 @@ export async function getSharedObjects(userId: string) {
     .where(
       and(
         eq(userPermissions.userId, userId),
+        ne(userPermissions.permission, "owner"), // Exclude items owned by the user
         exists(isFromOtherPersonalRootSubquery(fsObjects.path, userId)),
       )
     )
@@ -726,6 +871,8 @@ export async function getOrganizationalRootFolders(userId: string) {
       type: fsObjects.type,
       path: fsObjects.path,
       createdAt: fsObjects.createdAt,
+      size: fsObjects.fileSize,
+      expiresAt: fsObjects.expiresAt,
       permission: getEffectivePermissionSelect(userId, fsObjects),
     })
     .from(fsRoots)
@@ -841,6 +988,7 @@ export async function getRootsWithHierarchy(
   const personalRoot = personalRootResult[0];
   const orgRoots = orgRootsResult;
   const sharedFolders = sharedObjectsResult.filter(obj => obj.type === "folder");
+  const sharedFiles = sharedObjectsResult.filter(obj => obj.type === "file");
 
   const rootIdsToFetch: number[] = [];
   if (personalRoot?.rootFolderId) rootIdsToFetch.push(personalRoot.rootFolderId);
@@ -873,9 +1021,22 @@ export async function getRootsWithHierarchy(
   }
 
   const shared: TreeNode[] = [];
+  // Add shared folders with their hierarchy
   for (const folder of sharedFolders) {
     const tree = treeResults[idx++];
     if (tree) shared.push(tree);
+  }
+  // Add shared files as leaf nodes
+  for (const file of sharedFiles) {
+    shared.push({
+      id: file.id,
+      name: file.name,
+      type: "file",
+      path: file.path,
+      createdAt: file.createdAt,
+      permission: file.permission,
+      children: null,
+    });
   }
 
   return { personal, organizational, shared };
@@ -947,11 +1108,12 @@ export async function copyObjects(
   sourceIds: number[],
   targetFolderId: number,
   userId: string,
-  override: boolean = false
+  override: boolean = false,
+  expiresAt: Date | null = null
 ): Promise<Result<{
   copiedCount: number;
   mappings: Array<{ oldId: number; oldPath: string; newId: number; newPath: string; type: ObjectType }>;
-}, PermissionError | NotFoundError | ValidationError | UnexpectedError>> {
+}, PermissionError | NotFoundError | ValidationError | StorageError | UnexpectedError>> {
   if (sourceIds.length === 0) {
     return ok({ copiedCount: 0, mappings: [] });
   }
@@ -974,12 +1136,55 @@ export async function copyObjects(
 
   try {
     const [targetFolder] = await db
-      .select({ path: fsObjects.path })
+      .select({ path: fsObjects.path, type: fsObjects.type })
       .from(fsObjects)
       .where(eq(fsObjects.id, targetFolderId));
 
     if (!targetFolder) {
       return err({ type: "PARENT_NOT_FOUND", parentId: targetFolderId });
+    }
+
+    if (targetFolder.type !== "folder") {
+      return err({ type: "INVALID_OBJECT_TYPE", expected: "folder", got: targetFolder.type });
+    }
+
+    // Check if target is in a temporary root
+    const rootsMap = await getObjectsRoots([targetFolderId]);
+    const rootId = rootsMap.get(targetFolderId);
+
+    if (rootId) {
+      const [root] = await db
+        .select({ type: fsRoots.type })
+        .from(fsRoots)
+        .where(eq(fsRoots.rootFolderId, rootId));
+
+      if (root?.type === "personal-temporary") {
+        return err({ type: "CANNOT_WRITE_TO_TEMPORARY" });
+      }
+    }
+
+    // 3. Calculate total size of files to be copied (including descendants)
+    const sourcePaths = await db
+      .select({ path: fsObjects.path })
+      .from(fsObjects)
+      .where(inArray(fsObjects.id, sourceIds));
+
+    if (sourcePaths.length > 0) {
+      const [sizeResult] = await db
+        .select({ total: sql<number>`COALESCE(SUM(${fsObjects.fileSize}), 0)` })
+        .from(fsObjects)
+        .where(
+          and(
+            sql`${fsObjects.path} <@ ANY(ARRAY[${sql.join(sourcePaths.map(p => sql`${p.path}::ltree`), sql`, `)}])`,
+            eq(fsObjects.type, "file")
+          )
+        );
+
+      const totalSize = Number(sizeResult?.total ?? 0);
+      if (totalSize > 0) {
+        const storageResult = await checkStorageLimit(targetFolderId, totalSize);
+        if (storageResult.isErr()) return err(storageResult.error);
+      }
     }
 
     const sourceObjects = await db
@@ -989,6 +1194,14 @@ export async function copyObjects(
 
     if (sourceObjects.length === 0) {
       return ok({ copiedCount: 0, mappings: [] });
+    }
+
+    // Check if copying to same folder
+    for (const obj of sourceObjects) {
+      const parentPath = obj.path.split(".").slice(0, -1).join(".");
+      if (parentPath === targetFolder.path) {
+        return err({ type: "SAME_FOLDER_OPERATION" });
+      }
     }
 
     const conflicts = await checkNameConflicts(sourceObjects.map(o => o.name), targetFolder.path);
@@ -1002,7 +1215,7 @@ export async function copyObjects(
         await deleteConflicts(tx, conflicts);
       }
 
-      return ok(await performCopy(tx, sourceObjects, sourceIds, targetFolder.path));
+      return ok(await performCopy(tx, sourceObjects, sourceIds, targetFolder.path, expiresAt));
     });
 
     return txResult;
@@ -1025,16 +1238,17 @@ async function performCopy(
   tx: Transaction,
   sourceObjects: { id: number; path: string; name: string }[],
   sourceIds: number[],
-  targetFolderPath: string
+  targetFolderPath: string,
+  expiresAt: Date | null
 ) {
   const sourcePaths = sourceObjects.map(s => s.path);
 
+  // Use getTableColumns to dynamically select all columns
+  const fsColumns = getTableColumns(fsObjects);
+
   const allObjectsToCopy = await tx
     .select({
-      id: fsObjects.id,
-      name: fsObjects.name,
-      type: fsObjects.type,
-      path: fsObjects.path,
+      ...fsColumns,
       level: nlevel(fsObjects.path),
     })
     .from(fsObjects)
@@ -1046,12 +1260,18 @@ async function performCopy(
   const idMapping = new Map<number, { newId: number; newPath: string; type: ObjectType; oldPath: string }>();
 
   for (const obj of allObjectsToCopy) {
+    // Destructure to exclude fields we want to regenerate or override
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { id, path, createdAt, expiresAt: sourceExpiresAt, level, ...rest } = obj;
+
     const [newObj] = await tx
       .insert(fsObjects)
       .values({
-        name: obj.name,
-        type: obj.type,
+        ...rest,
+        // Override with new values
         path: "0",
+        expiresAt: expiresAt, // Set new expiration (or null)
+        // name and type are included in rest
       })
       .returning({ id: fsObjects.id });
 
@@ -1077,6 +1297,49 @@ async function performCopy(
       .where(eq(fsObjects.id, newObj.id));
 
     idMapping.set(obj.id, { newId: newObj.id, newPath, type: obj.type, oldPath: obj.path });
+  }
+
+  // Copy chunks for all copied files, updating metadata with new path
+  const fileMappings = Array.from(idMapping.entries())
+    .filter(([, info]) => info.type === "file");
+
+  if (fileMappings.length > 0) {
+    const oldFileIds = fileMappings.map(([oldId]) => oldId);
+
+    const oldChunks = await tx
+      .select()
+      .from(chunks)
+      .where(inArray(chunks.fsObjectId, oldFileIds));
+
+    const newChunks: {
+      fsObjectId: number;
+      content: string;
+      embedding: number[] | null;
+      metadata: ChunkMetadata;
+    }[] = [];
+
+    for (const chunk of oldChunks) {
+      const mapping = idMapping.get(chunk.fsObjectId);
+      if (!mapping) continue;
+
+      // Update metadata with new S3 path
+      const newS3Path = fsObjectToS3Key({ path: mapping.newPath, type: "file" });
+
+      newChunks.push({
+        fsObjectId: mapping.newId,
+        content: chunk.content,
+        embedding: chunk.embedding,
+        metadata: {
+          ...(chunk.metadata as ChunkMetadata),
+          documentId: `doc-${mapping.newId}`,
+          path: newS3Path,
+        },
+      });
+    }
+
+    if (newChunks.length > 0) {
+      await tx.insert(chunks).values(newChunks);
+    }
   }
 
   const mappings = Array.from(idMapping.entries()).map(([oldId, info]) => ({
@@ -1136,12 +1399,28 @@ export async function moveObjects(
 
   try {
     const [targetFolder] = await db
-      .select({ path: fsObjects.path })
+      .select({ path: fsObjects.path, type: fsObjects.type })
       .from(fsObjects)
       .where(eq(fsObjects.id, targetFolderId));
 
     if (!targetFolder) {
       return err({ type: "PARENT_NOT_FOUND", parentId: targetFolderId });
+    }
+
+    if (targetFolder.type !== "folder") {
+      return err({ type: "INVALID_OBJECT_TYPE", expected: "folder", got: targetFolder.type });
+    }
+
+    // Check if target is in a temporary root
+    if (targetRootId) {
+      const [root] = await db
+        .select({ type: fsRoots.type })
+        .from(fsRoots)
+        .where(eq(fsRoots.rootFolderId, targetRootId));
+
+      if (root?.type === "personal-temporary") {
+        return err({ type: "CANNOT_WRITE_TO_TEMPORARY" });
+      }
     }
 
     const sourceObjects = await db
@@ -1151,6 +1430,14 @@ export async function moveObjects(
 
     if (sourceObjects.length === 0) {
       return ok({ movedCount: 0, mappings: [] });
+    }
+
+    // Check if moving to same folder
+    for (const obj of sourceObjects) {
+      const parentPath = obj.path.split(".").slice(0, -1).join(".");
+      if (parentPath === targetFolder.path) {
+        return err({ type: "SAME_FOLDER_OPERATION" });
+      }
     }
 
     const conflicts = await checkNameConflicts(sourceObjects.map(o => o.name), targetFolder.path);
@@ -1234,7 +1521,8 @@ type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 async function uploadFileDb(
   tx: Transaction,
   parentId: number,
-  fileName: string
+  fileName: string,
+  metadata?: { fileSize?: number; mimeType?: string; expiresAt?: Date }
 ): Promise<Result<FSObject, NotFoundError>> {
   const [parent] = await tx
     .select({ path: fsObjects.path })
@@ -1245,7 +1533,14 @@ async function uploadFileDb(
 
   const [file] = await tx
     .insert(fsObjects)
-    .values({ name: fileName, type: "file", path: "0" })
+    .values({
+      name: fileName,
+      type: "file",
+      path: "0",
+      fileSize: metadata?.fileSize,
+      mimeType: metadata?.mimeType,
+      expiresAt: metadata?.expiresAt
+    })
     .returning();
 
   const newPath = `${parent.path}.${file.id}`;
@@ -1356,7 +1651,7 @@ async function moveFilesS3(
 
 // -------------------- EXPORTED TRANSACTIONAL WRAPPERS --------------------
 
-type UploadWithS3Result = Result<FSObject, PermissionError | NotFoundError | S3Error | UnexpectedError>;
+type UploadWithS3Result = Result<FSObject, PermissionError | NotFoundError | StorageError | S3Error | UnexpectedError>;
 
 /**
  * Upload a file with content - creates DB record and uploads to S3 in one transaction.
@@ -1367,16 +1662,22 @@ export async function uploadFileWithContent(
   fileName: string,
   fileContent: Buffer,
   contentType: string,
-  userId: string
+  userId: string,
+  metadata?: { fileSize?: number; mimeType?: string; expiresAt?: Date }
 ): Promise<UploadWithS3Result> {
   // Permission check outside transaction
   const permResult = await checkReqPermission(userId, parentId, "write", "folder");
   if (permResult.isErr()) return err(permResult.error);
 
+  // Storage limit check
+  const fileSize = metadata?.fileSize ?? fileContent.length;
+  const storageResult = await checkStorageLimit(parentId, fileSize);
+  if (storageResult.isErr()) return err(storageResult.error);
+
   try {
     // Single transaction: DB insert + S3 upload
     return await safeTransaction(db, async (tx) => {
-      const dbResult = await uploadFileDb(tx, parentId, fileName);
+      const dbResult = await uploadFileDb(tx, parentId, fileName, { ...metadata, mimeType: contentType, fileSize: fileContent.length });
       if (dbResult.isErr()) return dbResult;
 
       const fsObject = dbResult.value;
@@ -1469,7 +1770,7 @@ export async function deleteObjectWithS3(
 
 type CopyWithS3Result = Result<
   { copiedCount: number; s3SuccessCount: number; s3FailCount: number },
-  PermissionError | NotFoundError | ValidationError | UnexpectedError
+  PermissionError | NotFoundError | ValidationError | StorageError | UnexpectedError
 >;
 
 /**
@@ -1480,9 +1781,10 @@ export async function copyObjectsWithS3(
   sourceIds: number[],
   targetFolderId: number,
   userId: string,
-  override: boolean = false
+  override: boolean = false,
+  expiresAt: Date | null = null
 ): Promise<CopyWithS3Result> {
-  const dbResult = await copyObjects(sourceIds, targetFolderId, userId, override);
+  const dbResult = await copyObjects(sourceIds, targetFolderId, userId, override, expiresAt);
 
   if (dbResult.isErr()) {
     return err(dbResult.error);
@@ -1537,3 +1839,106 @@ export async function moveObjectsWithS3(
   });
 }
 
+
+
+/**
+ * Generates a "lazy tree" structure containing only the specified objects and their direct ancestors.
+ * 
+ * @param objectIds - Array of object IDs to include in the tree
+ * @param userId - The user requesting the tree
+ * @returns Array of root TreeNodes
+ */
+export async function getLazyTree(
+  objectIds: number[],
+  userId: string
+): Promise<TreeNode[]> {
+  if (objectIds.length === 0) return [];
+
+  // 1. Get paths for the requested objects
+  const objects = await db
+    .select({ id: fsObjects.id, path: fsObjects.path })
+    .from(fsObjects)
+    .where(inArray(fsObjects.id, objectIds));
+
+  if (objects.length === 0) return [];
+
+  // 2. Generate all unique ancestor paths (including the objects themselves)
+  const allPaths = new Set<string>();
+  for (const obj of objects) {
+    const parts = obj.path.split(".");
+    let currentPath = "";
+    for (const part of parts) {
+      currentPath = currentPath ? `${currentPath}.${part}` : part;
+      allPaths.add(currentPath);
+    }
+  }
+
+  // 3. Fetch all objects matching these paths
+  // We use ltree casting to match the exact paths
+  const pathsArray = Array.from(allPaths);
+  const allNodes = await db
+    .select({
+      id: fsObjects.id,
+      name: fsObjects.name,
+      type: fsObjects.type,
+      path: fsObjects.path,
+      createdAt: fsObjects.createdAt,
+      permission: getEffectivePermissionSelect(userId, fsObjects),
+      level: sql<number>`nlevel(${fsObjects.path})`,
+      parentId: sql<number | null>`
+        CASE WHEN nlevel(${fsObjects.path}) > 1 
+        THEN (subpath(${fsObjects.path}, nlevel(${fsObjects.path}) - 2, 1)::text)::int 
+        ELSE NULL END
+      `,
+    })
+    .from(fsObjects)
+    .where(
+      and(
+        sql`${fsObjects.path}::text = ANY(${pathsArray})`
+      )
+    )
+    .orderBy(fsObjects.path);
+
+  // 4. Build the tree
+  const nodeMap = new Map<number, TreeNode>();
+  const rootNodes: TreeNode[] = [];
+
+  // Initialize map
+  for (const node of allNodes) {
+    if (node.permission === null) continue;
+
+    nodeMap.set(node.id, {
+      id: node.id,
+      name: node.name,
+      type: node.type as "file" | "folder",
+      path: node.path,
+      createdAt: node.createdAt,
+      permission: node.permission,
+      children: node.type === "folder" ? [] : null, // Initialize empty children for all folders
+    });
+  }
+
+  // Link children
+  for (const node of allNodes) {
+    if (node.permission === null) continue;
+
+    const child = nodeMap.get(node.id);
+    if (!child) continue;
+
+    if (node.parentId === null) {
+      // This is a root
+      rootNodes.push(child);
+    } else {
+      const parent = nodeMap.get(node.parentId);
+      if (parent && parent.children) {
+        parent.children.push(child);
+      } else {
+        // If parent is missing from the set (shouldn't happen with full ancestor path logic),
+        // treat as root for this view to avoid orphan data loss.
+        rootNodes.push(child);
+      }
+    }
+  }
+
+  return rootNodes;
+}

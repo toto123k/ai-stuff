@@ -8,12 +8,14 @@ import {
     ContextMenuItem,
     ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { ProtectedMenuItem } from "./protected-menu-item";
 import { FoldersGrid } from "./folders-grid";
 import { FilesTable } from "./files-table";
 import {
     isReadOnlyRootAtom,
     canPasteAtom,
     fsObjectStatesAtom,
+    activeRootTypeAtom,
 } from "@/lib/store/library-store";
 import { useSetAtom } from "jotai";
 import { useLibraryData } from "./hooks/use-library-data";
@@ -34,6 +36,7 @@ export function LibraryContent() {
     useFileShortcuts([...folders, ...files], actions);
 
     const canPaste = useAtomValue(canPasteAtom);
+    const activeRootType = useAtomValue(activeRootTypeAtom);
     const setStates = useSetAtom(fsObjectStatesAtom);
 
     const handleBackgroundClick = (e: React.MouseEvent) => {
@@ -99,11 +102,7 @@ export function LibraryContent() {
                                     <FilesTable.Body />
                                 </FilesTable.Container>
                             </FilesTable.Root>
-                            {folders.length === 0 && (
-                                <div className="text-center text-muted-foreground mt-20">
-                                    אין פריטים להצגה
-                                </div>
-                            )}
+
                         </div>
                     )}
                 </ContextMenuTrigger>
@@ -117,9 +116,13 @@ export function LibraryContent() {
                             <ContextMenuItem onClick={() => openDialog("create-folder")}>
                                 <PlusIcon className="w-4 h-4 ml-2" /> צור תיקייה חדשה
                             </ContextMenuItem>
-                            <ContextMenuItem onClick={() => actions.onPaste(null)} disabled={!canPaste}>
-                                <ClipboardPasteIcon className="w-4 h-4 ml-2" /> הדבק
-                            </ContextMenuItem>
+                            <ProtectedMenuItem
+                                onClick={() => actions.onPaste(null)}
+                                disabled={!canPaste || activeRootType === "personal-temporary"}
+                                tooltipText={activeRootType === "personal-temporary" ? "לא ניתן להדביק קבצים בתיקייה זמנית" : undefined}
+                            >
+                                <ClipboardPasteIcon className="w-4 h-4 ml-2" /> הדבק לתיקייה הנוכחית
+                            </ProtectedMenuItem>
                         </>
                     ) : (
                         <ContextMenuItem disabled className="text-muted-foreground">

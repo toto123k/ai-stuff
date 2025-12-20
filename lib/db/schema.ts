@@ -1,5 +1,6 @@
 import { sql, type InferSelectModel } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   customType,
   foreignKey,
@@ -187,7 +188,7 @@ const ltree = customType<{ data: string }>({
 
 // 2. Define Enums
 export const objectTypeEnum = pgEnum('object_type', ['file', 'folder']);
-export const rootTypeEnum = pgEnum('root_type', ['personal', 'organizational']);
+export const rootTypeEnum = pgEnum('root_type', ['personal', 'organizational', 'personal-temporary']);
 export const permTypeEnum = pgEnum('perm_type', ['read', 'write', 'admin', 'owner']);
 
 export type ObjectType = (typeof objectTypeEnum.enumValues)[number];
@@ -202,8 +203,13 @@ export const fsObjects = pgTable('fs_objects', {
   type: objectTypeEnum('type').notNull(),
   path: ltree('path').notNull(),
   createdAt: timestamp('created_at').defaultNow(),
+  // File metadata (nullable - only for files, not folders)
+  expiresAt: timestamp('expires_at'),
+  fileSize: bigint('file_size', { mode: 'number' }),
+  mimeType: text('mime_type'),
 }, (table) => ({
   pathGistIdx: index('path_gist_idx').using('gist', table.path),
+  expiresAtIdx: index('fs_objects_expires_at_idx').on(table.expiresAt),
 }));
 
 export type FSObject = InferSelectModel<typeof fsObjects>;
@@ -212,6 +218,7 @@ export const fsRoots = pgTable('fs_roots', {
   id: serial('id').primaryKey(),
   rootFolderId: integer('root_folder_id').references(() => fsObjects.id).notNull(),
   type: rootTypeEnum('type').notNull(),
+  maxStorageBytes: bigint('max_storage_bytes', { mode: 'number' }).default(52428800).notNull(), // 50MB default
 }, (table) => ({
   typeIdx: index('fs_roots_type_idx').on(table.type),
 }));
@@ -225,3 +232,23 @@ export const userPermissions = pgTable('user_permissions', {
   pk: primaryKey({ columns: [table.userId, table.folderId] }),
   userIdx: index('user_permissions_user_idx').on(table.userId),
 }));
+
+// 6. Chunks Table (for RAG)
+export interface ChunkMetadata {
+  pageId?: number;
+  documentId?: string;
+  path: string; // S3 path
+}
+
+export const chunks = pgTable('chunks', {
+  id: serial('id').primaryKey(),
+  fsObjectId: integer('fs_object_id').references(() => fsObjects.id, { onDelete: 'cascade' }).notNull(),
+  content: text('content').notNull(),
+  embedding: jsonb('embedding').$type<number[]>(), // Vector embedding for similarity search
+  metadata: jsonb('metadata').$type<ChunkMetadata>().notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+}, (table) => ({
+  fsObjectIdx: index('chunks_fs_object_idx').on(table.fsObjectId),
+}));
+
+export type Chunk = InferSelectModel<typeof chunks>;

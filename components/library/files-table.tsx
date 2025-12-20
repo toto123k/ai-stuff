@@ -47,6 +47,18 @@ function useFilesTableContext() {
     return context;
 }
 
+function formatBytes(bytes: number, decimals = 2) {
+    if (!+bytes) return '0 Bytes';
+
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
 interface RootProps {
     files: FSObject[];
     actions: FSObjectActions;
@@ -94,13 +106,25 @@ function Root({ files, actions, fileInputRef, children }: RootProps) {
         {
             accessorKey: "createdAt",
             header: ({ column }) => (
-                <SortButton column={column}>שונה</SortButton>
+                <SortButton column={column}>תאריך</SortButton>
             ),
-            cell: ({ row }) => (
-                <span className="text-muted-foreground text-xs">
-                    {formatDistanceToNow(new Date(row.original.createdAt), { addSuffix: true, locale: he })}
-                </span>
-            ),
+            cell: ({ row }) => {
+                const expiresAt = row.original.expiresAt;
+                if (expiresAt) {
+                    return (
+                        <div className="flex flex-col">
+                            <span className="text-xs text-red-500 font-medium">
+                                פג תוקף {formatDistanceToNow(new Date(expiresAt), { addSuffix: true, locale: he })}
+                            </span>
+                        </div>
+                    )
+                }
+                return (
+                    <span className="text-muted-foreground text-xs">
+                        {formatDistanceToNow(new Date(row.original.createdAt), { addSuffix: true, locale: he })}
+                    </span>
+                );
+            },
             sortingFn: (rowA, rowB) => {
                 return new Date(rowA.original.createdAt).getTime() - new Date(rowB.original.createdAt).getTime();
             },
@@ -110,8 +134,10 @@ function Root({ files, actions, fileInputRef, children }: RootProps) {
             header: ({ column }) => (
                 <SortButton column={column}>גודל</SortButton>
             ),
-            cell: () => (
-                <span className="text-muted-foreground text-xs">2.4 MB</span>
+            cell: ({ row }) => (
+                <span className="text-muted-foreground text-xs">
+                    {row.original.size ? formatBytes(row.original.size) : "-"}
+                </span>
             ),
         },
     ], []);

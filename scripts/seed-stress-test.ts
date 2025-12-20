@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
-import { user, fsObjects, fsRoots, userPermissions } from '../lib/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { user, fsObjects, fsRoots, userPermissions, chunks, type ChunkMetadata } from '../lib/db/schema';
+import { eq, sql, and } from 'drizzle-orm';
 
 // Database connection
 const connectionString = process.env.POSTGRES_URL!;
@@ -37,12 +37,21 @@ const CONFIG = {
     MIN_USERS_PER_FOLDER: 1,
     MAX_USERS_PER_FOLDER: 5,
 
+    // Chunks (RAG)
+    MIN_CHUNKS_PER_FILE: 1,
+    MAX_CHUNKS_PER_FILE: 5,
+
     // Batch processing
     PERMISSION_BATCH_SIZE: 100,
     CONCURRENCY_LIMIT: 5,
 } as const;
 
-import { uploadFileWithContent } from '../lib/db/fs-queries';
+import {
+    uploadFileWithContent,
+    setUpNewUser,
+    getPersonalRoot,
+    getTemporaryRoot
+} from '../lib/db/fs-queries';
 
 // ========================================
 // UTILITY FUNCTIONS
@@ -66,6 +75,19 @@ function generateDummyContent(type: 'pdf' | 'docx'): { content: Buffer, contentT
         content: buffer,
         contentType: type === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     };
+}
+
+function generateChunkContent(pageNum: number): string {
+    const sentences = [
+        "This is sample text extracted from the document.",
+        "The content represents a chunk for RAG search.",
+        "Documents are split into multiple chunks for better retrieval.",
+        "Each chunk contains relevant information from a specific section.",
+        "This helps improve search accuracy and context relevance.",
+    ];
+    const numSentences = random(2, 5);
+    const selected = pickRandom(sentences, numSentences);
+    return `[Page ${pageNum}] ${selected.join(" ")} ${LOREM_IPSUM.slice(0, random(100, 300))}`;
 }
 
 // Better queue implementation
@@ -158,7 +180,25 @@ async function createFolderWithFiles(
                 const result = await uploadFileWithContent(folder.id, fileName, content, contentType, userId);
                 if (result.isErr()) {
                     console.error(`Failed to upload ${fileName}:`, result.error);
+                    return;
                 }
+
+                // Create random chunks for this file
+                const fsObject = result.value;
+                const numChunks = random(CONFIG.MIN_CHUNKS_PER_FILE, CONFIG.MAX_CHUNKS_PER_FILE);
+                const s3Path = fsObject.path.replace(/\./g, '/');
+
+                const chunkValues = Array.from({ length: numChunks }, (_, chunkIdx) => ({
+                    fsObjectId: fsObject.id,
+                    content: generateChunkContent(chunkIdx + 1),
+                    metadata: {
+                        pageId: chunkIdx + 1,
+                        documentId: `doc-${fsObject.id}`,
+                        path: s3Path,
+                    } as ChunkMetadata,
+                }));
+
+                await db.insert(chunks).values(chunkValues);
             } catch (e) {
                 console.error(`Failed to upload ${fileName} (exception):`, e);
             }
@@ -227,43 +267,94 @@ async function createOrganizationalRoots(allUserIds: string[]) {
     console.log(`✅ Created ${CONFIG.ORGANIZATIONAL_ROOTS_COUNT} organizational roots`);
 }
 
-async function createPersonalRoot(userId: string, userIndex: number) {
-    const depth = random(CONFIG.PERSONAL_ROOT_MIN_DEPTH, CONFIG.PERSONAL_ROOT_MAX_DEPTH);
-    const filesCount = random(CONFIG.PERSONAL_ROOT_MIN_FILES, CONFIG.PERSONAL_ROOT_MAX_FILES);
+async function populateUserRoots(allUserIds: string[]) {
+    console.log(`Setting up roots and populating for ${allUserIds.length} users...`);
 
-    const rootFolderId = await createFolderWithFiles(
-        `personal_${userId.substring(0, 8)}`,
-        null,
-        1,
-        depth,
-        filesCount,
-        userId
-    );
+    const tasks = allUserIds.map((userId) => async () => {
+        // 1. Setup User (Creates Personal and Temp roots)
+        const setupRes = await setUpNewUser(userId);
+        if (setupRes.isErr()) {
+            console.error(`Failed to setup user ${userId}:`, setupRes.error);
+            return;
+        }
 
-    await db.insert(fsRoots).values({
-        rootFolderId,
-        type: 'personal',
+        // 2. Get Roots to populate
+        // We need to query them since setUpNewUser doesn't return the IDs
+        const personalRootRes = await getPersonalRoot(userId);
+        const tempRootRes = await getTemporaryRoot(userId); // Need to import this
+
+        if (!personalRootRes.rootFolderId || !tempRootRes.rootFolderId) {
+            console.error(`Roots not found for user ${userId}`);
+            return;
+        }
+
+        // 3. Populate Personal Root
+        const depth = random(CONFIG.PERSONAL_ROOT_MIN_DEPTH, CONFIG.PERSONAL_ROOT_MAX_DEPTH);
+        const filesCount = random(CONFIG.PERSONAL_ROOT_MIN_FILES, CONFIG.PERSONAL_ROOT_MAX_FILES);
+
+        // Create subfolders/files INSIDE the personal root
+        await createFolderWithFiles(
+            `Personal Data`,
+            personalRootRes.rootFolderId,
+            1,
+            depth,
+            filesCount,
+            userId
+        );
+
+        // 4. Populate Temporary Root with ~3 files
+        const tempFilesCount = 3;
+        const tempFileTasks = Array.from({ length: tempFilesCount }, async (_, i) => {
+            const ext = Math.random() > 0.5 ? 'pdf' : 'docx';
+            const fileName = `temp_file_${i + 1}_${Date.now()}.${ext}`;
+            const { content, contentType } = generateDummyContent(ext);
+
+            const expiresAt = new Date();
+            expiresAt.setDate(expiresAt.getDate() + 7);
+
+            try {
+                await uploadFileWithContent(
+                    tempRootRes.rootFolderId!,
+                    fileName,
+                    content,
+                    contentType,
+                    userId,
+                    { expiresAt }
+                );
+            } catch (e) {
+                console.error(`Failed to upload temp file for ${userId}`, e);
+            }
+        });
+        await Promise.all(tempFileTasks);
     });
-}
 
-async function createPersonalRoots(allUserIds: string[]) {
-    console.log(`Creating personal roots for all ${allUserIds.length} users...`);
-
-    const tasks = allUserIds.map((userId, i) => () => createPersonalRoot(userId, i + 1));
     await runConcurrent(tasks, CONFIG.CONCURRENCY_LIMIT);
 
-    console.log('✅ Created personal roots for all users');
+    console.log('✅ Populated roots for all users');
 }
 
 async function addRandomPermissions(allUserIds: string[]) {
     console.log('Adding random permissions...');
 
     const allFolders = await db.select().from(fsObjects).where(eq(fsObjects.type, 'folder'));
-    console.log(`  Found ${allFolders.length} folders to assign permissions to`);
+    const allFiles = await db.select().from(fsObjects).where(eq(fsObjects.type, 'file'));
+    console.log(`  Found ${allFolders.length} folders and ${allFiles.length} files`);
 
-    const permissions = [];
+    // Sort folders by path depth (shallowest first) so we share parents before children
+    const sortedFolders = [...allFolders].sort((a, b) =>
+        a.path.split('.').length - b.path.split('.').length
+    );
 
-    for (const folder of allFolders) {
+    // Track which paths each user has access to (to avoid sharing descendants)
+    const userSharedPaths = new Map<string, string[]>();
+    for (const userId of allUserIds) {
+        userSharedPaths.set(userId, []);
+    }
+
+    const permissions: { userId: string; folderId: number; permission: 'read' | 'write' | 'admin' }[] = [];
+
+    // Share folders (avoiding nested sharing)
+    for (const folder of sortedFolders) {
         if (Math.random() > CONFIG.FOLDER_PERMISSION_CHANCE) continue;
 
         const numUsers = random(
@@ -273,6 +364,16 @@ async function addRandomPermissions(allUserIds: string[]) {
         const selectedUsers = pickRandom(allUserIds, numUsers);
 
         for (const userId of selectedUsers) {
+            // Check if user already has access to an ancestor of this folder
+            const userPaths = userSharedPaths.get(userId)!;
+            const isDescendantOfShared = userPaths.some(sharedPath =>
+                folder.path.startsWith(sharedPath + '.')
+            );
+
+            if (isDescendantOfShared) {
+                continue; // Skip - user already has access via parent folder
+            }
+
             const permTypes = ['read', 'write', 'admin'] as const;
             const permission = permTypes[random(0, 2)];
 
@@ -281,9 +382,70 @@ async function addRandomPermissions(allUserIds: string[]) {
                 folderId: folder.id,
                 permission,
             });
+
+            // Track this path for this user
+            userPaths.push(folder.path);
         }
     }
 
+    // Share some individual files FROM other users' personal roots TO the main user
+    // We need to find files that belong to other users' personal roots
+    const otherUserIds = allUserIds.filter(id => id !== CONFIG.EXISTING_USER_UUID);
+    const mainUserPaths = userSharedPaths.get(CONFIG.EXISTING_USER_UUID) || [];
+
+    // Get personal root paths for other users
+    const otherPersonalRootPaths: string[] = [];
+    for (const userId of otherUserIds) {
+        const personalRoot = await db.select({ path: fsObjects.path })
+            .from(fsRoots)
+            .innerJoin(fsObjects, eq(fsRoots.rootFolderId, fsObjects.id))
+            .innerJoin(userPermissions, and(
+                eq(userPermissions.folderId, fsRoots.rootFolderId),
+                eq(userPermissions.permission, 'owner'),
+                eq(userPermissions.userId, userId)
+            ))
+            .where(eq(fsRoots.type, 'personal'))
+            .limit(1);
+        if (personalRoot[0]) {
+            otherPersonalRootPaths.push(personalRoot[0].path);
+        }
+    }
+
+    // Filter files to only those inside other users' personal roots
+    const filesFromOthersPersonalRoots = allFiles.filter(file =>
+        otherPersonalRootPaths.some(rootPath =>
+            file.path === rootPath || file.path.startsWith(rootPath + '.')
+        )
+    );
+
+    console.log(`  Files in other users' personal roots: ${filesFromOthersPersonalRoots.length}`);
+
+    const FILE_SHARE_CHANCE = 0.5; // 50% chance for eligible files
+    let filesShared = 0;
+    for (const file of filesFromOthersPersonalRoots) {
+        if (Math.random() > FILE_SHARE_CHANCE) continue;
+
+        // Check if main user already has access via a shared folder
+        const isDescendantOfShared = mainUserPaths.some(sharedPath =>
+            file.path.startsWith(sharedPath + '.')
+        );
+
+        if (isDescendantOfShared) {
+            continue; // Skip - main user already has access via parent folder
+        }
+
+        const permTypes = ['read', 'write', 'admin'] as const;
+        const permission = permTypes[random(0, 2)];
+
+        permissions.push({
+            userId: CONFIG.EXISTING_USER_UUID,
+            folderId: file.id,
+            permission,
+        });
+        filesShared++;
+    }
+
+    console.log(`  Files shared individually: ${filesShared}`);
     console.log(`  Adding ${permissions.length} permission entries...`);
 
     for (let i = 0; i < permissions.length; i += CONFIG.PERMISSION_BATCH_SIZE) {
@@ -297,18 +459,21 @@ async function addRandomPermissions(allUserIds: string[]) {
 async function cleanup() {
     console.log('🧹 Cleaning up existing file system data...');
 
+    await db.delete(chunks);
+    // console.log('  - Deleted chunks');
+
     await db.delete(userPermissions);
-    // console.log('  - Deleted permissions'); // Removed for brevity
+    // console.log('  - Deleted permissions');
 
     await db.delete(fsRoots);
-    // console.log('  - Deleted roots'); // Removed for brevity
+    // console.log('  - Deleted roots');
 
     await db.delete(fsObjects);
-    // console.log('  - Deleted fs objects'); // Removed for brevity
+    // console.log('  - Deleted fs objects');
 
     // Delete test users but keep the main user
     await db.execute(sql`DELETE FROM "User" WHERE email LIKE 'user%@test.com'`);
-    // console.log('  - Deleted test users'); // Removed for brevity
+    // console.log('  - Deleted test users');
 
     console.log('✅ Cleanup complete\n');
 }
@@ -340,7 +505,7 @@ async function main() {
         await createOrganizationalRoots(allUserIds);
         console.log();
 
-        await createPersonalRoots(allUserIds);
+        await populateUserRoots(allUserIds);
         console.log();
 
         await addRandomPermissions(allUserIds);

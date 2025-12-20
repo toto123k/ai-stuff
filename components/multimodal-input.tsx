@@ -170,11 +170,12 @@ function PureMultimodalInput({
   ]);
 
   const uploadFile = useCallback(async (file: File) => {
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const response = await fetch("/api/files/upload", {
+      // Upload file (API will use temporary root if no parentId provided)
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/fs/files", {
         method: "POST",
         body: formData,
       });

@@ -82,6 +82,7 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
         sharedChildIds.push(sharedNodeId);
         if (!sharedRoot.permission) sharedHasUnselectable = true;
 
+        const isFolder = sharedRoot.type === "folder";
         const sharedNodeChildIds: string[] = [];
         let sharedRootHasUnselectable = false;
         if (sharedRoot.children?.length) {
@@ -96,8 +97,15 @@ const convertApiResponseToFlatTree = (response: ApiTreeResponse): FlatTreeNode[]
             name: sharedRoot.name,
             children: sharedNodeChildIds,
             parent: sharedId,
-            isBranch: true,
-            metadata: { folderId: sharedRoot.id, permission: sharedRoot.permission, hasNoPermission: !sharedRoot.permission, hasUnselectableChildren: sharedRootHasUnselectable, isLoaded: sharedRoot.children !== null },
+            isBranch: isFolder,
+            metadata: {
+                folderId: sharedRoot.id,
+                permission: sharedRoot.permission,
+                hasNoPermission: !sharedRoot.permission,
+                hasUnselectableChildren: sharedRootHasUnselectable,
+                isLoaded: sharedRoot.children !== null,
+                isFile: !isFolder,
+            },
         });
     }
     flatNodes.push({

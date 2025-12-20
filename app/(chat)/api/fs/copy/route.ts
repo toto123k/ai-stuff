@@ -31,7 +31,17 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "sourceIds must be a non-empty array" }, { status: StatusCodes.BAD_REQUEST });
         }
 
-        const result = await copyObjectsWithS3(sourceIds, targetFolderId, session.user.id, override);
+        // Check if copying to temporary storage
+        const { getFolderRootType } = await import("@/lib/db/fs-queries");
+        const targetRootType = await getFolderRootType(targetFolderId);
+
+        let expiresAt: Date | null = null;
+        if (targetRootType === "personal-temporary") {
+            expiresAt = new Date();
+            expiresAt.setDate(expiresAt.getDate() + 7);
+        }
+
+        const result = await copyObjectsWithS3(sourceIds, targetFolderId, session.user.id, override, expiresAt);
 
         if (result.isErr()) {
             return createFSErrorResponse(result.error);

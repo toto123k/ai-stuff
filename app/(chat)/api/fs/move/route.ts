@@ -31,6 +31,15 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "sourceIds must be a non-empty array" }, { status: StatusCodes.BAD_REQUEST });
         }
 
+        // Block moves from temporary storage
+        const { getFolderRootType } = await import("@/lib/db/fs-queries");
+        // Check all sources (or at least one if we assume homogenous selection)
+        // For robustness, checking all in parallel
+        const rootTypes = await Promise.all(sourceIds.map(id => getFolderRootType(id)));
+        if (rootTypes.some(t => t === "personal-temporary")) {
+            return NextResponse.json({ error: "Temporary files cannot be moved (copy allowed)" }, { status: StatusCodes.FORBIDDEN });
+        }
+
         const result = await moveObjectsWithS3(sourceIds, targetFolderId, session.user.id, override);
 
         if (result.isErr()) {

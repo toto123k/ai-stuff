@@ -1,6 +1,6 @@
 import * as React from "react";
-import { User, Building2, Share2 } from "lucide-react";
-import { RootType } from "@/lib/db/schema";
+import { User, Building2, Share2, Clock } from "lucide-react";
+import { RootType } from "@/lib/store/library-store";
 import {
     Breadcrumb,
     BreadcrumbItem,
@@ -10,24 +10,41 @@ import {
     BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { StorageIndicator } from "./storage-indicator";
 
 interface LibraryHeaderProps {
-    activeRootType: "personal" | "organizational" | "shared";
-    onRootTypeChange: (type: "personal" | "organizational" | "shared") => void;
+    activeRootType: RootType;
+    onRootTypeChange: (type: RootType) => void;
     breadcrumbs: { id: number | null; name: string }[];
     onBreadcrumbClick: (index: number) => void;
+    currentFolderId: number | null;
 }
+
+const getRootTitle = (type: RootType): string => {
+    switch (type) {
+        case "personal":
+            return "הקבצים שלי";
+        case "organizational":
+            return "הקבצים האירגוניים";
+        case "shared":
+            return "הקבצים המשותפים שלי";
+        case "personal-temporary":
+            return "הקבצים הזמניים";
+    }
+};
 
 export const LibraryHeader = ({
     activeRootType,
     onRootTypeChange,
     breadcrumbs,
     onBreadcrumbClick,
+    currentFolderId,
 }: LibraryHeaderProps) => {
+    console.log("currentFolderId", currentFolderId);
     return (
         <div className="flex flex-col border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
             <div className="flex h-16 items-center px-6 gap-6">
-                <h1 className="text-lg font-semibold hidden md:block">{activeRootType === "personal" ? "הקבצים שלי" : activeRootType === "organizational" ? "הקבצים האירגוניים" : "הקבצים המשותפים שלי"}</h1>
+                <h1 className="text-lg font-semibold hidden md:block">{getRootTitle(activeRootType)}</h1>
                 <div className="h-6 w-px bg-border hidden md:block" />
 
                 <Tabs
@@ -41,6 +58,10 @@ export const LibraryHeader = ({
                             <User size={14} />
                             אישי
                         </TabsTrigger>
+                        <TabsTrigger value="personal-temporary" className="text-xs px-4 gap-2">
+                            <Clock size={14} />
+                            זמניים
+                        </TabsTrigger>
                         <TabsTrigger value="organizational" className="text-xs px-4 gap-2">
                             <Building2 size={14} />
                             אירגוני
@@ -51,6 +72,17 @@ export const LibraryHeader = ({
                         </TabsTrigger>
                     </TabsList>
                 </Tabs>
+
+                <div className="flex-1" />
+
+                {/* Find the first breadcrumb with a valid ID to use as the storage context root.
+                    In Personal tabs, this is the first item (root).
+                    In Shared/Org tabs, the first item is null, so it picks the selected folder (which acts as root). */}
+                <StorageIndicator
+                    rootId={breadcrumbs.find(b => b.id !== null)?.id ?? null}
+                    className="hidden md:flex"
+                    activeRootType={activeRootType}
+                />
             </div>
 
             <div className="px-6 pb-3 pt-1">

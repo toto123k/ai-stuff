@@ -15,8 +15,10 @@ import {
     currentFolderIdAtom,
     isReadOnlyRootAtom,
     currentMutateKeyAtom,
+    breadcrumbsAtom,
 } from "@/lib/store/library-store";
 import { mutate } from "swr";
+import { getStorageKey } from "../storage-indicator";
 
 export function useFileUpload() {
     const [, addUpload] = useAtom(addUploadAtom);
@@ -28,6 +30,7 @@ export function useFileUpload() {
     const currentFolderId = useAtomValue(currentFolderIdAtom);
     const isReadOnlyRoot = useAtomValue(isReadOnlyRootAtom);
     const currentMutateKey = useAtomValue(currentMutateKeyAtom);
+    const breadcrumbs = useAtomValue(breadcrumbsAtom);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -69,6 +72,10 @@ export function useFileUpload() {
                             completeUpload(uploadItem.id);
                             toast.success(`העלאת ${file.name} הצליחה`);
                             mutate(currentMutateKey);
+                            // Invalidate storage for the root folder (first valid breadcrumb)
+                            const rootId = breadcrumbs.find(b => b.id !== null)?.id ?? null;
+                            const storageKey = getStorageKey(rootId);
+                            if (storageKey) mutate(storageKey);
                         } else {
                             let errorMessage = `העלאת ${file.name} נכשלה`;
                             try {

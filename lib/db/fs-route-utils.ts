@@ -36,7 +36,8 @@ const FS_ERROR_MAP: Record<FSError["type"], { status: StatusCodes; message: stri
     S3_DELETE_FAILED: { status: StatusCodes.INTERNAL_SERVER_ERROR, message: "Failed to delete file from storage" },
     S3_COPY_FAILED: { status: StatusCodes.INTERNAL_SERVER_ERROR, message: "Failed to copy file in storage" },
     S3_OBJECT_NOT_FOUND: { status: StatusCodes.NOT_FOUND, message: "File not found in storage" },
-
+    SAME_FOLDER_OPERATION: { status: StatusCodes.BAD_REQUEST, message: "Cannot copy/move to same folder" },
+    CANNOT_WRITE_TO_TEMPORARY: { status: StatusCodes.BAD_REQUEST, message: "Cannot copy/move to temporary folders" },
     // Unexpected
     UNEXPECTED: { status: StatusCodes.INTERNAL_SERVER_ERROR, message: "An unexpected error occurred" },
 };

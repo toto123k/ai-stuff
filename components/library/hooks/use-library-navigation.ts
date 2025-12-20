@@ -31,6 +31,7 @@ export function useLibraryNavigation() {
         let label = "אישי";
         if (type === "organizational") label = "אירגונית";
         if (type === "shared") label = "משותף איתי";
+        if (type === "personal-temporary") label = "זמניים";
 
         setBreadcrumbs([{ id: null, name: label }]);
     };

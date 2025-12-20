@@ -18,7 +18,9 @@ export type ValidationError =
     | { type: "CANNOT_MOVE_ROOT" }
     | { type: "CROSS_ROOT_OPERATION" }
     | { type: "INVALID_OBJECT_TYPE"; expected?: string; got?: string }
-    | { type: "NAME_ALREADY_EXISTS"; name?: string; parentId?: number };
+    | { type: "NAME_ALREADY_EXISTS"; name?: string; parentId?: number }
+    | { type: "SAME_FOLDER_OPERATION" }
+    | { type: "CANNOT_WRITE_TO_TEMPORARY" };
 
 // Storage errors
 export type StorageError =

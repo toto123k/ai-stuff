@@ -3,7 +3,7 @@ import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@/com
 import { ProtectedMenuItem } from "./protected-menu-item";
 import { FSObject, FSObjectActions } from "./types";
 import { useAtom, useAtomValue } from "jotai";
-import { fsObjectStatesAtom, canPasteAtom } from "@/lib/store/library-store";
+import { fsObjectStatesAtom, canPasteAtom, activeRootTypeAtom } from "@/lib/store/library-store";
 
 interface FSObjectMenuProps {
     object: FSObject;
@@ -15,6 +15,7 @@ export const FSObjectMenu = ({ object, actions }: FSObjectMenuProps) => {
     const canAdmin = ["owner", "admin"].includes(object.permission!);
     const [states, setStates] = useAtom(fsObjectStatesAtom);
     const canPaste = useAtomValue(canPasteAtom);
+    const activeRootType = useAtomValue(activeRootTypeAtom);
 
     // Count selected items to determine if we're in multi-select mode
     const selectedCount = Array.from(states.values()).filter(s => s.has("selected")).length;
@@ -71,9 +72,15 @@ export const FSObjectMenu = ({ object, actions }: FSObjectMenuProps) => {
             <ContextMenuItem onClick={() => handleCopyCut("cut")}>
                 <ScissorsIcon className="ml-2 w-4 h-4" /> גזור
             </ContextMenuItem>
-            <ContextMenuItem onClick={() => actions.onPaste(object)} disabled={!canPaste}>
-                <ClipboardPasteIcon className="ml-2 w-4 h-4" /> הדבק
-            </ContextMenuItem>
+            {object.type === "folder" && (
+                <ProtectedMenuItem
+                    onClick={() => actions.onPaste(object)}
+                    disabled={!canPaste || activeRootType === "personal-temporary"}
+                    tooltipText={activeRootType === "personal-temporary" ? "לא ניתן להדביק קבצים בתיקייה זמנית" : undefined}
+                >
+                    <ClipboardPasteIcon className="ml-2 w-4 h-4" /> הדבק לתיקייה זו
+                </ProtectedMenuItem>
+            )}
             <ContextMenuItem onClick={handleDownload}>
                 <DownloadIcon className="ml-2 w-4 h-4" /> הורד
             </ContextMenuItem>

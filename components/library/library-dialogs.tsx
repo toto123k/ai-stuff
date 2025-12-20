@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useAtom } from "jotai";
 import { activeDialogAtom } from "@/lib/store/library-store";
 import { useFileOperations } from "./hooks/use-file-operations";
@@ -10,7 +11,12 @@ import { ShareDialog } from "./share-dialog";
 import { MetadataDialog } from "./metadata-dialog";
 import { OverrideDialog } from "./override-dialog";
 import { DocxPreviewDialog } from "./docx-preview-dialog";
-import { PdfPreviewDialog } from "./pdf-preview-dialog";
+
+// Dynamic import with SSR disabled to avoid DOMMatrix error
+const PdfPreviewDialog = dynamic(
+    () => import("./pdf-preview-dialog").then(mod => mod.PdfPreviewDialog),
+    { ssr: false }
+);
 
 export function LibraryDialogs() {
     const [dialogState, setDialogState] = useAtom(activeDialogAtom);

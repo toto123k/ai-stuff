@@ -7,6 +7,7 @@ export type FSObject = {
     path: string;
     createdAt: string;
     size?: number;
+    expiresAt?: string | null;
     permission?: PermType;
 };
 

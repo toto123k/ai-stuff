@@ -3,7 +3,7 @@ import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { DUMMY_PASSWORD } from "@/lib/constants";
-import { createCollectionRoot } from "@/lib/db/fs-queries";
+import { setUpNewUser } from "@/lib/db/fs-queries";
 import { createGuestUser, getUser } from "@/lib/db/queries";
 import { authConfig } from "./auth.config";
 
@@ -71,8 +71,8 @@ export const {
       credentials: {},
       async authorize() {
         const [guestUser] = await createGuestUser();
-        const rootResult = await createCollectionRoot(guestUser.id, "personal");
-        if (rootResult.isErr()) return null;
+        const setupResult = await setUpNewUser(guestUser.id);
+        if (setupResult.isErr()) return null;
         return { ...guestUser, type: "guest" };
       },
     }),

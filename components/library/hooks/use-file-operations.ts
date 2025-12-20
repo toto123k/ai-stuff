@@ -15,6 +15,7 @@ import {
     fsObjectStatesAtom,
     selectedIdsAtom,
 } from "@/lib/store/library-store";
+import { getStorageKey } from "../storage-indicator";
 
 export function useFileOperations(files: FSObject[] = []) {
     const activeRootType = useAtomValue(activeRootTypeAtom);
@@ -36,7 +37,12 @@ export function useFileOperations(files: FSObject[] = []) {
         return filesRef.current.filter(f => currentSelectedIds.includes(f.id));
     }, [store]);
 
-    const refresh = useCallback(() => mutate(currentMutateKey), [currentMutateKey]);
+    const refresh = useCallback(() => {
+        mutate(currentMutateKey);
+        // Also refresh storage indicator
+        const storageKey = getStorageKey(currentFolderId);
+        if (storageKey) mutate(storageKey);
+    }, [currentMutateKey, currentFolderId]);
 
     const openDialog = useCallback((type: DialogState["type"], targets: FSObject[] = []) => {
         setDialogState({ type, targets });

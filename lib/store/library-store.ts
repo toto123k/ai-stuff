@@ -3,7 +3,7 @@ import { selectAtom } from "jotai/utils";
 import { FSObject } from "@/components/library/types";
 import { STATUS_CODES } from "node:http";
 
-export type RootType = "personal" | "organizational" | "shared";
+export type RootType = "personal" | "organizational" | "shared" | "personal-temporary";
 
 // Navigation Atoms
 export const activeRootTypeAtom = atom<RootType>("personal");
@@ -28,7 +28,9 @@ export const currentMutateKeyAtom = atom((get) => {
             ? "/api/fs/personal"
             : activeRootType === "shared"
                 ? "/api/fs/shared"
-                : "/api/fs/org";
+                : activeRootType === "personal-temporary"
+                    ? "/api/fs/temporary"
+                    : "/api/fs/org";
 });
 
 // Dialog State - combines dialog type and target object(s)

@@ -11,6 +11,7 @@ export function LibraryView({ userId }: { userId: string }) {
   // We only need navigation hooks here for the header
   const {
     activeRootType,
+    currentFolderId,
     breadcrumbs,
     handleRootTypeChange,
     handleBreadcrumbClick,
@@ -24,6 +25,7 @@ export function LibraryView({ userId }: { userId: string }) {
           onRootTypeChange={handleRootTypeChange}
           breadcrumbs={breadcrumbs}
           onBreadcrumbClick={handleBreadcrumbClick}
+          currentFolderId={currentFolderId}
         />
 
         <LibraryContent />

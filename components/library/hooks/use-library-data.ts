@@ -31,13 +31,16 @@ export function useLibraryData() {
 
     useEffect(() => {
         if (
-            activeRootType === "personal" &&
+            (activeRootType === "personal" || activeRootType === "personal-temporary") &&
             !Array.isArray(data) &&
             data?.rootFolderId &&
             currentFolderId === null
         ) {
             setCurrentFolderId(data.rootFolderId);
-            setBreadcrumbs([{ id: data.rootFolderId, name: "אישי" }]);
+            setBreadcrumbs([{
+                id: data.rootFolderId,
+                name: activeRootType === "personal" ? "אישי" : "זמניים"
+            }]);
         }
     }, [data, activeRootType, currentFolderId, setCurrentFolderId, setBreadcrumbs]);
 
