@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/app/(auth)/auth";
 import { getFile } from "@/lib/db/fs-queries";
-import { getS3DownloadUrl, fsObjectToS3Key } from "@/lib/s3";
+import { getS3DownloadUrl, fsObjectToS3Key, downloadFromS3 } from "@/lib/s3";
 import { createFSErrorResponse } from "@/lib/db/fs-route-utils";
 import { StatusCodes } from "http-status-codes";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -24,6 +24,7 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const fileId = searchParams.get("fileId");
     const forceDownload = searchParams.get("download") === "true";
+    const proxy = searchParams.get("proxy") === "true";
 
     if (!fileId) {
         return NextResponse.json({ error: "מזהה קובץ חסר" }, { status: StatusCodes.BAD_REQUEST });
@@ -40,6 +41,23 @@ export async function GET(req: NextRequest) {
     }
 
     const s3Key = fsObjectToS3Key(file);
+
+    // If proxy requested, fetch from S3 server-side and stream to client
+    if (proxy) {
+        try {
+            const fileStream = await downloadFromS3(s3Key);
+            // Cast to any because AWS SDK stream type vs Web Response stream type mismatch
+            return new NextResponse(fileStream as any, {
+                headers: {
+                    "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "Content-Disposition": `inline; filename="${encodeURIComponent(file.name)}"`,
+                },
+            });
+        } catch (error) {
+            console.error("Proxy download error:", error);
+            return NextResponse.json({ error: "Failed to fetch file" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
+        }
+    }
 
     // Only pass filename if forceDownload is true (forces Content-Disposition: attachment)
     const url = await getS3DownloadUrl(s3Key, 3600, forceDownload ? file.name : undefined);

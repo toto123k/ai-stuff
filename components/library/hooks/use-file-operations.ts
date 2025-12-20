@@ -349,6 +349,20 @@ export function useFileOperations(files: FSObject[] = []) {
     const handleOpen = useCallback(async (obj: FSObject) => {
         if (obj.type !== "file") return;
 
+        const fileName = obj.name.toLowerCase();
+
+        // Check for DOCX file
+        if (fileName.endsWith(".docx")) {
+            openDialog("preview", [obj]);
+            return;
+        }
+
+        // Check for PDF file
+        if (fileName.endsWith(".pdf")) {
+            openDialog("pdf-preview", [obj]);
+            return;
+        }
+
         try {
             const res = await fetch(`/api/fs/download?fileId=${obj.id}`);
             if (!res.ok) {
@@ -363,7 +377,7 @@ export function useFileOperations(files: FSObject[] = []) {
             const errorMessage = e instanceof Error ? e.message : "פתיחת הקובץ נכשלה";
             toast.error(errorMessage);
         }
-    }, []);
+    }, [openDialog]);
 
     const actions: FSObjectActions = useMemo(() => ({
         onRename: (obj: FSObject) => openDialog("rename", [obj]),

@@ -379,3 +379,9 @@
     @apply bg-background text-foreground;
   }
 }
+
+
+.docx-wrapper {
+    background: white !important;
+    padding: 1rem !important;
+}

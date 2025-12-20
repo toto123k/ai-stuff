@@ -32,7 +32,7 @@ export const currentMutateKeyAtom = atom((get) => {
 });
 
 // Dialog State - combines dialog type and target object(s)
-export type LibraryDialogType = "create-folder" | "rename" | "delete" | "share" | "metadata" | "override";
+export type LibraryDialogType = "create-folder" | "rename" | "delete" | "share" | "metadata" | "override" | "preview" | "pdf-preview";
 export interface DialogState {
     type: LibraryDialogType;
     targets: FSObject[]; // Object(s) the dialog operates on

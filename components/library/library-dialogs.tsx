@@ -9,6 +9,8 @@ import { DeleteDialog } from "./delete-dialog";
 import { ShareDialog } from "./share-dialog";
 import { MetadataDialog } from "./metadata-dialog";
 import { OverrideDialog } from "./override-dialog";
+import { DocxPreviewDialog } from "./docx-preview-dialog";
+import { PdfPreviewDialog } from "./pdf-preview-dialog";
 
 export function LibraryDialogs() {
     const [dialogState, setDialogState] = useAtom(activeDialogAtom);
@@ -64,6 +66,19 @@ export function LibraryDialogs() {
                 }}
                 conflictName={dialogState?.metadata?.conflictName}
             />
+
+            <DocxPreviewDialog
+                isOpen={dialogState?.type === "preview"}
+                onOpenChange={(open) => !open && closeDialog()}
+                file={target}
+            />
+
+            <PdfPreviewDialog
+                isOpen={dialogState?.type === "pdf-preview"}
+                onOpenChange={(open) => !open && closeDialog()}
+                file={target}
+            />
         </>
     );
 }
+
