@@ -1,6 +1,7 @@
 import { auth } from "@/app/(auth)/auth";
 import { getTreeHierarchy } from "@/lib/db/fs-queries";
-import { ChatSDKError } from "@/lib/errors";
+import { StatusCodes } from "http-status-codes";
+import { NextResponse } from "next/server";
 
 export async function GET(
     request: Request,
@@ -9,14 +10,14 @@ export async function GET(
     try {
         const session = await auth();
         if (!session?.user) {
-            return new ChatSDKError("unauthorized:chat").toResponse();
+            return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
         }
 
         const { id } = await params;
         const folderId = parseInt(id, 10);
 
         if (isNaN(folderId)) {
-            return new ChatSDKError("bad_request:api").toResponse();
+            return NextResponse.json({ error: "Invalid folder ID" }, { status: StatusCodes.BAD_REQUEST });
         }
 
         const { searchParams } = new URL(request.url);
@@ -25,14 +26,12 @@ export async function GET(
         const tree = await getTreeHierarchy(folderId, session.user.id, depth);
 
         if (!tree) {
-            return new ChatSDKError("not_found:chat").toResponse();
+            return NextResponse.json({ error: "Folder not found or no permission" }, { status: StatusCodes.NOT_FOUND });
         }
 
         return Response.json(tree);
     } catch (error) {
-        if (error instanceof ChatSDKError) {
-            return error.toResponse();
-        }
-        return new ChatSDKError("bad_request:database").toResponse();
+        console.error("Tree hierarchy error:", error);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
     }
 }

@@ -30,13 +30,11 @@ interface RootProps {
     allFileIds: number[];
     actions: FSObjectActions;
     children: ReactNode;
-    getSelectedFSObjects?: () => FSObject[];
 }
 
-const Root = memo(({ file, allFileIds, actions, children, getSelectedFSObjects }: RootProps) => {
+const Root = memo(({ file, allFileIds, actions, children }: RootProps) => {
     const isAccessDenied = !file.permission;
 
-    console.log("file", file);
     // This atom only triggers re-render when THIS file's state changes
     const stateAtom = useMemo(() => createFSObjectStateAtom(file.id), [file.id]);
     const stateSet = useAtomValue(stateAtom);
@@ -188,6 +186,11 @@ const Root = memo(({ file, allFileIds, actions, children, getSelectedFSObjects }
         }
     }, [file.id, isAccessDenied, isSelected, setStates, setLastClickedId]);
 
+    const handleDoubleClick = useCallback(() => {
+        if (isAccessDenied) return;
+        actions.onOpen(file);
+    }, [isAccessDenied, actions, file]);
+
     const rowContent = (
         <TableRow
             className={cn(
@@ -198,6 +201,7 @@ const Root = memo(({ file, allFileIds, actions, children, getSelectedFSObjects }
                 (isCopy) && "opacity-80"
             )}
             onClick={handleRowClick}
+            onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}
             data-state={isSelected ? "selected" : undefined}
         >
@@ -239,7 +243,7 @@ const Root = memo(({ file, allFileIds, actions, children, getSelectedFSObjects }
                     rowContent
                 )}
             </ContextMenuTrigger>
-            <FSObjectMenu object={file} actions={actions} getSelectedFSObjects={getSelectedFSObjects} />
+            <FSObjectMenu object={file} actions={actions} />
         </ContextMenu>
     );
 }, (prevProps, nextProps) => {

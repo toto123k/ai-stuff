@@ -71,7 +71,8 @@ export const {
       credentials: {},
       async authorize() {
         const [guestUser] = await createGuestUser();
-        await createCollectionRoot(guestUser.id, "personal");
+        const rootResult = await createCollectionRoot(guestUser.id, "personal");
+        if (rootResult.isErr()) return null;
         return { ...guestUser, type: "guest" };
       },
     }),

@@ -1,7 +1,9 @@
 import { auth } from "@/app/(auth)/auth";
 import { addPermission, getPermissions } from "@/lib/db/fs-queries";
-import { ChatSDKError } from "@/lib/errors";
+import { createFSErrorResponse } from "@/lib/db/fs-route-utils";
 import { z } from "zod";
+import { StatusCodes } from "http-status-codes";
+import { NextResponse } from "next/server";
 
 const addPermissionSchema = z.object({
   targetUserId: z.string().uuid(),
@@ -13,23 +15,28 @@ export async function POST(request: Request) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     const json = await request.json();
-    const { targetUserId, folderId, permission } = addPermissionSchema.parse(json);
+    const parsed = addPermissionSchema.safeParse(json);
+
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid input" }, { status: StatusCodes.BAD_REQUEST });
+    }
+
+    const { targetUserId, folderId, permission } = parsed.data;
 
     const result = await addPermission(targetUserId, folderId, permission, session.user.id);
 
-    return Response.json(result);
+    if (result.isErr()) {
+      return createFSErrorResponse(result.error);
+    }
+
+    return NextResponse.json(result.value);
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return new ChatSDKError("bad_request:api").toResponse();
-    }
-    if (error instanceof ChatSDKError) {
-      return error.toResponse();
-    }
-    return new ChatSDKError("bad_request:database").toResponse();
+    console.error("POST permission handler error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }
 
@@ -38,22 +45,24 @@ export async function GET(request: Request) {
   const folderId = searchParams.get("folderId");
 
   if (!folderId) {
-    return new ChatSDKError("bad_request:api").toResponse();
+    return NextResponse.json({ error: "Missing folderId" }, { status: StatusCodes.BAD_REQUEST });
   }
 
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
-    const permissions = await getPermissions(parseInt(folderId), session.user.id);
+    const result = await getPermissions(parseInt(folderId), session.user.id);
 
-    return Response.json(permissions);
+    if (result.isErr()) {
+      return createFSErrorResponse(result.error);
+    }
+
+    return NextResponse.json(result.value);
   } catch (error) {
-    if (error instanceof ChatSDKError) {
-      return error.toResponse();
-    }
-    return new ChatSDKError("bad_request:database").toResponse();
+    console.error("GET permissions handler error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }

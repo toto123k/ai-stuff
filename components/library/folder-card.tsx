@@ -66,37 +66,71 @@ export const FolderCard = ({ folder, onNavigate, actions }: FolderCardProps) => 
         }
     };
 
-    const folderContent = (
-        <div
-            onClick={(e) => {
-                if (hasAccess) {
-                    if (e.ctrlKey || e.metaKey) {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        setStates((prev) => {
-                            const next = new Map(prev);
-                            const currentState = next.get(folder.id) || new Set();
-                            const nextState = new Set(currentState);
+    const handleClick = (e: React.MouseEvent) => {
+        if (!hasAccess) return;
 
-                            if (nextState.has("selected")) {
-                                nextState.delete("selected");
-                            } else {
-                                nextState.add("selected");
-                            }
+        if (e.ctrlKey || e.metaKey) {
+            // Ctrl+Click: toggle selection (add/remove from multi-select)
+            e.stopPropagation();
+            e.preventDefault();
+            setStates((prev) => {
+                const next = new Map(prev);
+                const currentState = next.get(folder.id) || new Set();
+                const nextState = new Set(currentState);
 
-                            if (nextState.size === 0) {
-                                next.delete(folder.id);
-                            } else {
-                                next.set(folder.id, nextState);
-                            }
+                if (nextState.has("selected")) {
+                    nextState.delete("selected");
+                } else {
+                    nextState.add("selected");
+                }
 
-                            return next;
-                        });
-                    } else {
-                        onNavigate(folder.id, folder.name);
+                if (nextState.size === 0) {
+                    next.delete(folder.id);
+                } else {
+                    next.set(folder.id, nextState);
+                }
+
+                return next;
+            });
+        } else {
+            // Regular click: clear all and select only this folder
+            setStates((prev) => {
+                const next = new Map(prev);
+
+                // Clear all "selected" states, but preserve "cut"/"copy"
+                for (const [id, state] of next.entries()) {
+                    if (state.has("selected")) {
+                        const nextState = new Set(state);
+                        nextState.delete("selected");
+                        if (nextState.size === 0) {
+                            next.delete(id);
+                        } else {
+                            next.set(id, nextState);
+                        }
                     }
                 }
-            }}
+
+                // Select this folder
+                const currentState = next.get(folder.id) || new Set();
+                const nextState = new Set(currentState);
+                nextState.add("selected");
+                next.set(folder.id, nextState);
+
+                return next;
+            });
+        }
+    };
+
+    const handleDoubleClick = () => {
+        if (hasAccess) {
+            onNavigate(folder.id, folder.name);
+        }
+    };
+
+    const folderContent = (
+        <div
+            onClick={handleClick}
+            onDoubleClick={handleDoubleClick}
             onContextMenu={handleContextMenu}
             className={cn(
                 "group flex items-center gap-3 p-3 rounded-xl border border-border bg-card transition-all shadow-sm",

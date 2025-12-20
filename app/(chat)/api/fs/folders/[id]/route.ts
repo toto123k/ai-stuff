@@ -1,7 +1,10 @@
 import { auth } from "@/app/(auth)/auth";
 import { deleteObject, getObjects, updateObject } from "@/lib/db/fs-queries";
+import { createFSErrorResponse } from "@/lib/db/fs-route-utils";
 import { ChatSDKError } from "@/lib/errors";
 import z from "zod";
+import { StatusCodes } from "http-status-codes";
+import { NextResponse } from "next/server";
 
 export async function GET(
   request: Request,
@@ -10,24 +13,23 @@ export async function GET(
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     const { id } = await params;
     const folderId = parseInt(id);
     if (isNaN(folderId)) {
-      return new ChatSDKError("bad_request:api").toResponse();
+      return NextResponse.json({ error: "Invalid ID" }, { status: StatusCodes.BAD_REQUEST });
     }
 
     const objects = await getObjects(folderId, session.user.id);
 
     return Response.json(objects);
   } catch (error) {
-    console.log(error)
     if (error instanceof ChatSDKError) {
       return error.toResponse();
     }
-    return new ChatSDKError("bad_request:database").toResponse();
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }
 
@@ -38,23 +40,25 @@ export async function DELETE(
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     const { id } = await params;
     const folderId = parseInt(id);
     if (isNaN(folderId)) {
-      return new ChatSDKError("bad_request:api").toResponse();
+      return NextResponse.json({ error: "Invalid ID" }, { status: StatusCodes.BAD_REQUEST });
     }
 
-    await deleteObject(folderId, session.user.id);
+    const result = await deleteObject(folderId, session.user.id);
 
-    return Response.json({ success: true });
+    if (result.isErr()) {
+      return createFSErrorResponse(result.error);
+    }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
-    if (error instanceof ChatSDKError) {
-      return error.toResponse();
-    }
-    return new ChatSDKError("bad_request:database").toResponse();
+    console.error("DELETE folder handler error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }
 
@@ -63,7 +67,6 @@ const updateFolderSchema = z.object({
   parentId: z.number().optional(),
 });
 
-
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -71,28 +74,31 @@ export async function PATCH(
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     const { id } = await params;
-    const fileId = parseInt(id);
-    if (isNaN(fileId)) {
-      return new ChatSDKError("bad_request:api").toResponse();
+    const folderId = parseInt(id);
+    if (isNaN(folderId)) {
+      return NextResponse.json({ error: "Invalid ID" }, { status: StatusCodes.BAD_REQUEST });
     }
 
     const json = await request.json();
-    const updates = updateFolderSchema.parse(json);
+    const parsed = updateFolderSchema.safeParse(json);
 
-    await updateObject(fileId, updates, session.user.id);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid input" }, { status: StatusCodes.BAD_REQUEST });
+    }
 
-    return Response.json({ success: true });
+    const result = await updateObject(folderId, parsed.data, session.user.id);
+
+    if (result.isErr()) {
+      return createFSErrorResponse(result.error);
+    }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return new ChatSDKError("bad_request:api").toResponse();
-    }
-    if (error instanceof ChatSDKError) {
-      return error.toResponse();
-    }
-    return new ChatSDKError("bad_request:database").toResponse();
+    console.error("PATCH folder handler error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }

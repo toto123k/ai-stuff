@@ -1,6 +1,7 @@
 import { atom } from "jotai";
 import { selectAtom } from "jotai/utils";
 import { FSObject } from "@/components/library/types";
+import { STATUS_CODES } from "node:http";
 
 export type RootType = "personal" | "organizational" | "shared";
 
@@ -10,7 +11,6 @@ export const currentFolderIdAtom = atom<number | null>(null);
 export const breadcrumbsAtom = atom<{ id: number | null; name: string }[]>([
     { id: null, name: "אישי" },
 ]);
-
 // Derived Navigation Atoms
 export const isReadOnlyRootAtom = atom((get) => {
     const currentFolderId = get(currentFolderIdAtom);
@@ -32,10 +32,16 @@ export const currentMutateKeyAtom = atom((get) => {
 });
 
 // Dialog State - combines dialog type and target object(s)
-export type LibraryDialogType = "create-folder" | "rename" | "delete" | "share" | "metadata";
+export type LibraryDialogType = "create-folder" | "rename" | "delete" | "share" | "metadata" | "override";
 export interface DialogState {
     type: LibraryDialogType;
     targets: FSObject[]; // Object(s) the dialog operates on
+    metadata?: {
+        operation?: "copy" | "move";
+        sourceIds?: number[];
+        targetFolderId?: number;
+        conflictName?: string;
+    };
 }
 export const activeDialogAtom = atom<DialogState | null>(null);
 
@@ -56,6 +62,21 @@ export const canPasteAtom = selectAtom(fsObjectStatesAtom, (states) => {
     }
     return false;
 });
+
+// Derived atom that returns the IDs of selected objects
+export const selectedIdsAtom = selectAtom(
+    fsObjectStatesAtom,
+    (states) => {
+        const ids: number[] = [];
+        states.forEach((state, id) => {
+            if (state.has("selected")) {
+                ids.push(id);
+            }
+        });
+        return ids;
+    },
+    (a, b) => a.length === b.length && a.every((id, i) => id === b[i])
+);
 
 // Custom equality function for Set comparison
 const setEquals = <T>(a: Set<T>, b: Set<T>): boolean => {

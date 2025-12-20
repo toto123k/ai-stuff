@@ -1,7 +1,9 @@
 import { auth } from "@/app/(auth)/auth";
 import { createFolder } from "@/lib/db/fs-queries";
-import { ChatSDKError } from "@/lib/errors";
+import { createFSErrorResponse } from "@/lib/db/fs-route-utils";
 import { z } from "zod";
+import { StatusCodes } from "http-status-codes";
+import { NextResponse } from "next/server";
 
 const createFolderSchema = z.object({
   parentId: z.number(),
@@ -12,22 +14,27 @@ export async function POST(request: Request) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     const json = await request.json();
-    const { parentId, name } = createFolderSchema.parse(json);
+    const parsed = createFolderSchema.safeParse(json);
 
-    const folder = await createFolder(parentId, name, session.user.id);
+    if (!parsed.success) {
+      return NextResponse.json({ error: "Invalid input" }, { status: StatusCodes.BAD_REQUEST });
+    }
 
-    return Response.json(folder);
+    const { parentId, name } = parsed.data;
+
+    const result = await createFolder(parentId, name, session.user.id);
+
+    if (result.isErr()) {
+      return createFSErrorResponse(result.error);
+    }
+
+    return NextResponse.json(result.value);
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return new ChatSDKError("bad_request:api").toResponse();
-    }
-    if (error instanceof ChatSDKError) {
-      return error.toResponse();
-    }
-    return new ChatSDKError("bad_request:database").toResponse();
+    console.error("Create folder handler error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }

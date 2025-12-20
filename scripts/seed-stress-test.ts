@@ -16,31 +16,33 @@ const CONFIG = {
     EXISTING_USER_UUID: '1a4fd90c-46a2-441c-ab1c-5b93f6d9d317',
 
     // User generation
-    NEW_USERS_COUNT: 99, // Total ~100 users
+    NEW_USERS_COUNT: 5,
 
     // Organizational roots
-    ORGANIZATIONAL_ROOTS_COUNT: 25,
-    ORGANIZATIONAL_ROOT_DEPTH: 5,
-    ORGANIZATIONAL_ROOT_FILES_PER_LAYER: 25,
+    ORGANIZATIONAL_ROOTS_COUNT: 3,
+    ORGANIZATIONAL_ROOT_DEPTH: 2,
+    ORGANIZATIONAL_ROOT_FILES_PER_LAYER: 5,
 
     // Personal roots
-    PERSONAL_ROOT_MIN_DEPTH: 3,
-    PERSONAL_ROOT_MAX_DEPTH: 4,
+    PERSONAL_ROOT_MIN_DEPTH: 2,
+    PERSONAL_ROOT_MAX_DEPTH: 2,
     PERSONAL_ROOT_MIN_FILES: 1,
-    PERSONAL_ROOT_MAX_FILES: 100,
+    PERSONAL_ROOT_MAX_FILES: 10,
 
     // Folder structure
-    SUBFOLDERS_PER_LEVEL: 5,
+    SUBFOLDERS_PER_LEVEL: 2,
 
     // Permissions
-    FOLDER_PERMISSION_CHANCE: 0.3, // 30% chance a folder gets permissions
+    FOLDER_PERMISSION_CHANCE: 0.8,
     MIN_USERS_PER_FOLDER: 1,
     MAX_USERS_PER_FOLDER: 5,
 
     // Batch processing
-    PERMISSION_BATCH_SIZE: 1000, // Increased batch size
-    CONCURRENCY_LIMIT: 10,
+    PERMISSION_BATCH_SIZE: 100,
+    CONCURRENCY_LIMIT: 5,
 } as const;
+
+import { uploadFileWithContent } from '../lib/db/fs-queries';
 
 // ========================================
 // UTILITY FUNCTIONS
@@ -52,33 +54,18 @@ const pickRandom = <T,>(arr: T[], count: number): T[] => {
     return shuffled.slice(0, count);
 };
 
-// Simple concurrency limiter
-async function pMap<T, R>(
-    items: T[],
-    mapper: (item: T, index: number) => Promise<R>,
-    concurrency: number
-): Promise<R[]> {
-    const results: R[] = new Array(items.length);
-    const executing: Promise<void>[] = [];
+const LOREM_IPSUM = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
 
-    for (let i = 0; i < items.length; i++) {
-        const p = mapper(items[i], i).then(res => {
-            results[i] = res;
-        });
-        executing.push(p);
+function generateDummyContent(type: 'pdf' | 'docx'): { content: Buffer, contentType: string } {
+    // We are just generating text content for now as we don't have pdf-lib/docx installed.
+    // S3 doesn't validate the binary format, so this "simulates" a file.
+    const repeated = LOREM_IPSUM.repeat(random(10, 50));
+    const buffer = Buffer.from(repeated + `\n\nGenerated as pseudo-${type} file.`);
 
-        if (executing.length >= concurrency) {
-            await Promise.race(executing);
-            // Remove completed promises (this is a bit naive but works for simple cases)
-            // A better way is to track which promise finished, but for this script it's fine
-            // actually Promise.race doesn't tell us which one finished easily without wrapping.
-            // Let's use a simpler queue approach.
-        }
-        // Clean up executing array to avoid memory leaks if we were doing this properly,
-        // but for a seed script, let's just use a proper queue implementation below.
-    }
-    await Promise.all(executing);
-    return results;
+    return {
+        content: buffer,
+        contentType: type === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    };
 }
 
 // Better queue implementation
@@ -137,7 +124,8 @@ async function createFolderWithFiles(
     parentId: number | null,
     depth: number,
     maxDepth: number,
-    filesPerLayer: number
+    filesPerLayer: number,
+    userId: string
 ): Promise<number> {
     // Create folder
     const [folder] = await db.insert(fsObjects).values({
@@ -154,25 +142,30 @@ async function createFolderWithFiles(
     WHERE id = ${folder.id}
   `);
 
-    // Create files in batch
+    // IMMEDIATELY give owner admin permission so we can upload files into it
+    await giveOwnerAdminPermission(userId, folder.id);
+
+    // Create files using real S3 upload
     if (filesPerLayer > 0) {
-        const filesToInsert = Array.from({ length: filesPerLayer }, (_, i) => ({
-            name: `file_${i + 1}.txt`,
-            type: 'file' as const,
-            path: '0', // Temporary
-        }));
+        const fileTasks = Array.from({ length: filesPerLayer }, async (_, i) => {
+            const ext = Math.random() > 0.5 ? 'pdf' : 'docx';
+            const fileName = `file_${i + 1}_${Date.now()}.${ext}`;
+            const { content, contentType } = generateDummyContent(ext);
 
-        const createdFiles = await db.insert(fsObjects).values(filesToInsert).returning();
+            try {
+                // uploadFileWithContent handles DB insert + S3 upload transactionally
+                // It requires 'write' permission on parent, which we just granted.
+                const result = await uploadFileWithContent(folder.id, fileName, content, contentType, userId);
+                if (result.isErr()) {
+                    console.error(`Failed to upload ${fileName}:`, result.error);
+                }
+            } catch (e) {
+                console.error(`Failed to upload ${fileName} (exception):`, e);
+            }
+        });
 
-        // Update file paths in batch (using a CTE or just parallel updates)
-        // Parallel updates are simpler to write here
-        await Promise.all(createdFiles.map(file =>
-            db.execute(sql`
-        UPDATE fs_objects 
-        SET path = ${`${folderPath}.${file.id}`}::ltree 
-        WHERE id = ${file.id}
-      `)
-        ));
+        // Execute uploads in parallel (limited by db pool but batch is small)
+        await Promise.all(fileTasks);
     }
 
     // Recurse if we haven't reached max depth
@@ -183,11 +176,14 @@ async function createFolderWithFiles(
                 folder.id,
                 depth + 1,
                 maxDepth,
-                filesPerLayer
+                filesPerLayer,
+                userId
             )
         );
 
-        // Run subfolder creation in parallel
+        // Run subfolder creation
+        // Note: we use our simple queue/concurrency inside recursion which might limit overall
+        // but sticking to Promise.all here for simplicity of the tree
         await Promise.all(subfolderTasks.map(task => task()));
     }
 
@@ -198,7 +194,7 @@ async function giveOwnerAdminPermission(userId: string, folderId: number) {
     await db.insert(userPermissions).values({
         userId,
         folderId,
-        permission: 'admin',
+        permission: 'owner',
     }).onConflictDoNothing();
 }
 
@@ -207,8 +203,6 @@ async function createOrganizationalRoots(allUserIds: string[]) {
 
     const tasks = Array.from({ length: CONFIG.ORGANIZATIONAL_ROOTS_COUNT }, (_, i) => async () => {
         const index = i + 1;
-        // console.log(`  Creating org root ${index}/${CONFIG.ORGANIZATIONAL_ROOTS_COUNT}...`); // Too verbose with concurrency
-
         const randomOwner = pickRandom(allUserIds, 1)[0];
 
         const rootFolderId = await createFolderWithFiles(
@@ -216,16 +210,16 @@ async function createOrganizationalRoots(allUserIds: string[]) {
             null,
             1,
             CONFIG.ORGANIZATIONAL_ROOT_DEPTH,
-            CONFIG.ORGANIZATIONAL_ROOT_FILES_PER_LAYER
+            CONFIG.ORGANIZATIONAL_ROOT_FILES_PER_LAYER,
+            randomOwner
         );
 
         await db.insert(fsRoots).values({
             rootFolderId,
-            ownerId: randomOwner,
             type: 'organizational',
         });
 
-        await giveOwnerAdminPermission(randomOwner, rootFolderId);
+        // Permission already given inside createFolderWithFiles, but adding again is safe (onConflictDoNothing)
     });
 
     await runConcurrent(tasks, CONFIG.CONCURRENCY_LIMIT);
@@ -237,23 +231,19 @@ async function createPersonalRoot(userId: string, userIndex: number) {
     const depth = random(CONFIG.PERSONAL_ROOT_MIN_DEPTH, CONFIG.PERSONAL_ROOT_MAX_DEPTH);
     const filesCount = random(CONFIG.PERSONAL_ROOT_MIN_FILES, CONFIG.PERSONAL_ROOT_MAX_FILES);
 
-    // console.log(`  Creating personal root for user ${userIndex}...`);
-
     const rootFolderId = await createFolderWithFiles(
         `personal_${userId.substring(0, 8)}`,
         null,
         1,
         depth,
-        filesCount
+        filesCount,
+        userId
     );
 
     await db.insert(fsRoots).values({
         rootFolderId,
-        ownerId: userId,
         type: 'personal',
     });
-
-    await giveOwnerAdminPermission(userId, rootFolderId);
 }
 
 async function createPersonalRoots(allUserIds: string[]) {

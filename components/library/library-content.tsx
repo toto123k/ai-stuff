@@ -26,7 +26,7 @@ export function LibraryContent() {
     const { handleNavigate } = useLibraryNavigation();
     const { fileInputRef, onDrop, getRootProps, getInputProps, isDragActive } =
         useFileUpload();
-    const { actions, openDialog } = useFileOperations();
+    const { actions, openDialog } = useFileOperations([...folders, ...files]);
 
     const canPaste = useAtomValue(canPasteAtom);
 

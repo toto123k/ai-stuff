@@ -206,6 +206,8 @@ export const fsObjects = pgTable('fs_objects', {
   pathGistIdx: index('path_gist_idx').using('gist', table.path),
 }));
 
+export type FSObject = InferSelectModel<typeof fsObjects>;
+
 export const fsRoots = pgTable('fs_roots', {
   id: serial('id').primaryKey(),
   rootFolderId: integer('root_folder_id').references(() => fsObjects.id).notNull(),

@@ -28,14 +28,13 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { FSObject, FSObjectActions } from "./types";
 import { FileRow } from "./file-row";
-import { fsObjectStatesAtom, FSObjectState } from "@/lib/store/library-store";
+import { fsObjectStatesAtom, FSObjectState, selectedIdsAtom } from "@/lib/store/library-store";
 
 interface FilesTableContextValue {
     table: TanstackTable<FSObject>;
     actions: FSObjectActions;
     allFileIds: number[];
     fileInputRef: RefObject<HTMLInputElement>;
-    getSelectedFSObjects: () => FSObject[];
 }
 
 const FilesTableContext = createContext<FilesTableContextValue | null>(null);
@@ -126,26 +125,12 @@ function Root({ files, actions, fileInputRef, children }: RootProps) {
         getSortedRowModel: getSortedRowModel(),
     });
 
-    const store = useStore();
-
-    const getSelectedFSObjects = useCallback(() => {
-        const states = store.get(fsObjectStatesAtom);
-        const selectedIds: number[] = [];
-        states.forEach((state, id) => {
-            if (state.has("selected")) {
-                selectedIds.push(id);
-            }
-        });
-        return files.filter(f => selectedIds.includes(f.id));
-    }, [store, files]);
-
     const contextValue = useMemo(() => ({
         table,
         actions,
         allFileIds,
         fileInputRef,
-        getSelectedFSObjects,
-    }), [table, actions, allFileIds, fileInputRef, getSelectedFSObjects]);
+    }), [table, actions, allFileIds, fileInputRef]);
 
     return (
         <FilesTableContext.Provider value={contextValue}>
@@ -270,7 +255,7 @@ interface BodyProps {
 }
 
 function Body({ className }: BodyProps) {
-    const { table, actions, allFileIds, getSelectedFSObjects } = useFilesTableContext();
+    const { table, actions, allFileIds } = useFilesTableContext();
     const rows = table.getRowModel().rows;
 
     return (
@@ -282,7 +267,6 @@ function Body({ className }: BodyProps) {
                         file={row.original}
                         allFileIds={allFileIds}
                         actions={actions}
-                        getSelectedFSObjects={getSelectedFSObjects}
                     >
                         {row.getVisibleCells().map((cell) => (
                             <FileRow.Cell key={cell.id}>

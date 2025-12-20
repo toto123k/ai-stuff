@@ -1,7 +1,9 @@
 import { auth } from "@/app/(auth)/auth";
-import { uploadFile } from "@/lib/db/fs-queries";
-import { ChatSDKError } from "@/lib/errors";
+import { uploadFileWithContent } from "@/lib/db/fs-queries";
+import { createFSErrorResponse } from "@/lib/db/fs-route-utils";
 import { z } from "zod";
+import { StatusCodes } from "http-status-codes";
+import { NextResponse } from "next/server";
 
 const uploadSchema = z.object({
   parentId: z.coerce.number(),
@@ -12,40 +14,32 @@ export async function POST(request: Request) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return new ChatSDKError("unauthorized:chat").toResponse();
+      return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     const formData = await request.formData();
 
-    const parsedData = uploadSchema.parse({
+    const parsedData = uploadSchema.safeParse({
       parentId: formData.get("parentId"),
       file: formData.get("file"),
     });
 
-    const { parentId, file } = parsedData;
+    if (!parsedData.success) {
+      return NextResponse.json({ error: "Invalid input" }, { status: StatusCodes.BAD_REQUEST });
+    }
 
-    const fileName = file.name;
+    const { parentId, file } = parsedData.data;
+    const fileBuffer = Buffer.from(await file.arrayBuffer());
 
-    const fileBuffer = await file.arrayBuffer();
+    const result = await uploadFileWithContent(parentId, file.name, fileBuffer, file.type, session.user.id);
 
-    console.log("Uploading:", fileName, "to Parent:", parentId);
+    if (result.isErr()) {
+      return createFSErrorResponse(result.error);
+    }
 
-    const uploadedFile = await uploadFile(
-      parentId,
-      fileName,
-      session.user.id,
-    );
-
-    return Response.json(uploadedFile);
+    return NextResponse.json(result.value);
   } catch (error) {
-    console.log(error);
-
-    if (error instanceof z.ZodError) {
-      return new ChatSDKError("bad_request:api").toResponse();
-    }
-    if (error instanceof ChatSDKError) {
-      return error.toResponse();
-    }
-    return new ChatSDKError("bad_request:database").toResponse();
+    console.error("Upload handler error:", error);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
   }
 }

@@ -1,12 +1,13 @@
 import { auth } from "@/app/(auth)/auth";
 import { getRootsWithHierarchy } from "@/lib/db/fs-queries";
-import { ChatSDKError } from "@/lib/errors";
+import { StatusCodes } from "http-status-codes";
+import { NextResponse } from "next/server";
 
 export async function GET(request: Request) {
     try {
         const session = await auth();
         if (!session?.user) {
-            return new ChatSDKError("unauthorized:chat").toResponse();
+            return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
         }
 
         const { searchParams } = new URL(request.url);
@@ -17,9 +18,6 @@ export async function GET(request: Request) {
         return Response.json(result);
     } catch (error) {
         console.error("Tree API error:", error);
-        if (error instanceof ChatSDKError) {
-            return error.toResponse();
-        }
-        return new ChatSDKError("bad_request:database").toResponse();
+        return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
     }
 }

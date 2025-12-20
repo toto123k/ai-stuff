@@ -8,10 +8,11 @@ import { RenameDialog } from "./rename-dialog";
 import { DeleteDialog } from "./delete-dialog";
 import { ShareDialog } from "./share-dialog";
 import { MetadataDialog } from "./metadata-dialog";
+import { OverrideDialog } from "./override-dialog";
 
 export function LibraryDialogs() {
     const [dialogState, setDialogState] = useAtom(activeDialogAtom);
-    const { handleCreateFolder, handleRename, handleDelete } = useFileOperations();
+    const { handleCreateFolder, handleRename, handleDelete, handleConfirmOverride } = useFileOperations();
 
     const closeDialog = () => setDialogState(null);
 
@@ -50,6 +51,18 @@ export function LibraryDialogs() {
                 isOpen={dialogState?.type === "metadata"}
                 onOpenChange={(open) => !open && closeDialog()}
                 item={target}
+            />
+
+            <OverrideDialog
+                isOpen={dialogState?.type === "override"}
+                onOpenChange={(open) => !open && closeDialog()}
+                onConfirm={() => {
+                    const meta = dialogState?.metadata;
+                    if (meta?.operation && meta?.sourceIds && meta?.targetFolderId) {
+                        handleConfirmOverride(meta.operation, meta.sourceIds, meta.targetFolderId);
+                    }
+                }}
+                conflictName={dialogState?.metadata?.conflictName}
             />
         </>
     );

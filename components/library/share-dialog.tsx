@@ -56,7 +56,10 @@ export function ShareDialog({ isOpen, onClose, item }: ShareDialogProps) {
         isOpen && item ? `/api/fs/permissions?folderId=${item.id}` : null,
         async (url: string) => {
             const res = await fetch(url);
-            if (!res.ok) throw new Error("Failed to fetch permissions");
+            if (!res.ok) {
+                const errorData = await res.json();
+                throw new Error(errorData.error || "Failed to fetch permissions");
+            }
             return res.json();
         }
     );
@@ -77,7 +80,7 @@ export function ShareDialog({ isOpen, onClose, item }: ShareDialogProps) {
 
             if (!res.ok) {
                 const errorData = await res.json();
-                throw new Error(errorData.message || "Failed to add permission");
+                throw new Error(errorData.error || "Failed to add permission");
             }
 
             toast.success("Permission added successfully");

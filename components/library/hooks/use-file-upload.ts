@@ -70,8 +70,17 @@ export function useFileUpload() {
                             toast.success(`העלאת ${file.name} הצליחה`);
                             mutate(currentMutateKey);
                         } else {
-                            failUpload({ id: uploadItem.id, error: xhr.statusText });
-                            toast.error(`העלאת ${file.name} נכשלה`);
+                            let errorMessage = `העלאת ${file.name} נכשלה`;
+                            try {
+                                const errorData = JSON.parse(xhr.responseText);
+                                if (errorData.error) {
+                                    errorMessage = errorData.error;
+                                }
+                            } catch {
+                                // If parsing fails, use default message
+                            }
+                            failUpload({ id: uploadItem.id, error: errorMessage });
+                            toast.error(errorMessage);
                         }
                     };
 

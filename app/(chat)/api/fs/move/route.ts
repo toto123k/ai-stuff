@@ -1,35 +1,55 @@
 import { auth } from "@/app/(auth)/auth";
-import { moveObjects } from "@/lib/db/fs-queries";
+import { moveObjectsWithS3 } from "@/lib/db/fs-queries";
+import { createFSErrorResponse } from "@/lib/db/fs-route-utils";
+import { z } from "zod";
+import { StatusCodes } from "http-status-codes";
 import { NextResponse } from "next/server";
+
+const moveSchema = z.object({
+    sourceIds: z.array(z.number()),
+    targetFolderId: z.number(),
+    override: z.boolean().optional().default(false),
+});
 
 export async function POST(request: Request) {
     const session = await auth();
     if (!session?.user?.id) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        return NextResponse.json({ error: "Unauthorized" }, { status: StatusCodes.UNAUTHORIZED });
     }
 
     try {
-        const { sourceIds, targetFolderId } = await request.json();
+        const json = await request.json();
+        const parsed = moveSchema.safeParse(json);
 
-        if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
+        if (!parsed.success) {
+            return NextResponse.json({ error: "Invalid input" }, { status: StatusCodes.BAD_REQUEST });
+        }
+
+        const { sourceIds, targetFolderId, override } = parsed.data;
+
+        if (sourceIds.length === 0) {
+            return NextResponse.json({ error: "sourceIds must be a non-empty array" }, { status: StatusCodes.BAD_REQUEST });
+        }
+
+        const result = await moveObjectsWithS3(sourceIds, targetFolderId, session.user.id, override);
+
+        if (result.isErr()) {
+            return createFSErrorResponse(result.error);
+        }
+
+        const { movedCount, s3SuccessCount, s3FailCount } = result.value;
+
+        // Return 207 Multi-Status if some S3 operations failed
+        if (s3FailCount > 0) {
             return NextResponse.json(
-                { error: "sourceIds must be a non-empty array" },
-                { status: 400 }
+                { movedCount, s3SuccessCount, s3FailCount },
+                { status: StatusCodes.MULTI_STATUS }
             );
         }
 
-        if (!targetFolderId || typeof targetFolderId !== "number") {
-            return NextResponse.json(
-                { error: "targetFolderId must be a number" },
-                { status: 400 }
-            );
-        }
-
-        const result = await moveObjects(sourceIds, targetFolderId, session.user.id);
-        return NextResponse.json(result);
+        return NextResponse.json({ movedCount, s3SuccessCount, s3FailCount });
     } catch (error: unknown) {
-        console.error("Move error:", error);
-        const message = error instanceof Error ? error.message : "Failed to move";
-        return NextResponse.json({ error: message }, { status: 500 });
+        console.error("Move handler error:", error);
+        return NextResponse.json({ error: "Internal Server Error" }, { status: StatusCodes.INTERNAL_SERVER_ERROR });
     }
 }

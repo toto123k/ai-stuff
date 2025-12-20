@@ -1,4 +1,4 @@
-import "server-only";
+
 
 import {
   and,
@@ -11,7 +11,9 @@ import {
   exists,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js"; import postgres from "postgres";
-import { ChatSDKError } from "../errors";
+
+import { Result, ok, err, safeTry, ResultAsync } from "neverthrow";
+import { UnexpectedError, PermissionError, NotFoundError, ValidationError, S3Error } from "./fs-errors";
 import {
   fsObjects,
   fsRoots,
@@ -20,7 +22,25 @@ import {
   type PermType,
   type ObjectType,
   type RootType,
+  type FSObject,
 } from "./schema";
+import { safeTransaction } from "./safe-transaction";
+
+
+// S3 imports for combined operations
+import {
+  uploadToS3,
+  deleteFromS3,
+  copyS3Object,
+  fsObjectToS3Key,
+} from "@/lib/s3";
+import PQueue from "p-queue";
+
+// S3 concurrency limit
+const S3_CONCURRENCY = 5;
+
+// ... existing code ...
+
 import {
   isDescendantOf,
   nlevel,
@@ -55,6 +75,23 @@ const getNodePathSubquery = (nodeId: number) => {
 
 };
 
+const getEffectivePermissionSelect = (userId: string, targetNode: typeof fsObjects) => {
+  const permFolder = aliasedTable(fsObjects, "permFolder");
+
+  return sql<PermType | null>`(${db
+    .select({ permission: userPermissions.permission })
+    .from(userPermissions)
+    .innerJoin(permFolder, eq(permFolder.id, userPermissions.folderId))
+    .where(
+      and(
+        eq(userPermissions.userId, userId),
+        sql`${targetNode.path} <@ ${permFolder.path}`
+      )
+    )
+    .orderBy(desc(nlevel(permFolder.path)))
+    .limit(1)})`;
+};
+
 const isFromOtherPersonalRootSubquery = (
   objectPath: typeof fsObjects.path,
   excludeUserId: string
@@ -84,8 +121,31 @@ const isFromOtherPersonalRootSubquery = (
 export async function getEffectivePermission(
   userId: string,
   nodeId: number
-): Promise<PermType | null> {
+): Promise<Result<PermType | null, NotFoundError | UnexpectedError>> {
+
   try {
+    // Check if user exists
+    const [userExists] = await db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.id, userId))
+      .limit(1);
+
+    if (!userExists) {
+      return err({ type: "USER_NOT_FOUND", userId });
+    }
+
+    // Check if object exists
+    const [objectExists] = await db
+      .select({ id: fsObjects.id })
+      .from(fsObjects)
+      .where(eq(fsObjects.id, nodeId))
+      .limit(1);
+
+    if (!objectExists) {
+      return err({ type: "OBJECT_NOT_FOUND", objectId: nodeId });
+    }
+
     const permFolder = aliasedTable(fsObjects, "permFolder");
 
     const nodePathSubquery = getNodePathSubquery(nodeId);
@@ -106,13 +166,13 @@ export async function getEffectivePermission(
       .limit(1);
 
     if (perms.length > 0) {
-      return perms[0].permission;
+      return ok(perms[0].permission);
     }
 
-    return null;
+    return ok(null);
   } catch (error) {
     console.error("Failed to check permissions", error);
-    return null;
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
@@ -122,6 +182,25 @@ export async function doesPathExist(path: string): Promise<boolean> {
     .from(fsObjects)
     .where(ltreeEq(fsObjects.path, path));
   return !!node;
+}
+
+/**
+ * Helper to check permission on an object.
+ */
+async function checkReqPermission(
+  userId: string,
+  objectId: number,
+  required: PermType,
+  resourceType: "file" | "folder" = "folder"
+): Promise<Result<PermType, PermissionError | NotFoundError | UnexpectedError>> {
+  const permResult = await getEffectivePermission(userId, objectId);
+  if (permResult.isErr()) return err(permResult.error);
+
+  const perm = permResult.value;
+  if (!perm || PERM_LEVELS[perm] < PERM_LEVELS[required]) {
+    return err({ type: "NO_PERMISSION", resource: resourceType, required });
+  }
+  return ok(perm);
 }
 
 /**
@@ -222,61 +301,54 @@ export async function getObjectsRoots(objectIds: number[]): Promise<Map<number, 
 export async function createCollectionRoot(
   ownerId: string,
   type: RootType
-) {
-  try {
-    return await db.transaction(async (tx) => {
-      const [rootFolder] = await tx
-        .insert(fsObjects)
-        .values({
-          name: "Root",
-          type: "folder",
-          path: "0", // Temporary path, will update with ID
-        })
-        .returning();
+): Promise<Result<FSObject, UnexpectedError>> {
+  return safeTransaction(db, async (tx) => {
+    const [rootFolder] = await tx
+      .insert(fsObjects)
+      .values({
+        name: "Root",
+        type: "folder",
+        path: "0", // Temporary path, will update with ID
+      })
+      .returning();
 
-      const newPath = `${rootFolder.id}`;
-      await tx
-        .update(fsObjects)
-        .set({ path: newPath })
-        .where(eq(fsObjects.id, rootFolder.id));
+    const newPath = `${rootFolder.id}`;
+    await tx
+      .update(fsObjects)
+      .set({ path: newPath })
+      .where(eq(fsObjects.id, rootFolder.id));
 
-      await tx.insert(fsRoots).values({
-        rootFolderId: rootFolder.id,
-        type,
-      });
-
-      await tx.insert(userPermissions).values({
-        userId: ownerId,
-        folderId: rootFolder.id,
-        permission: "owner",
-      });
-
-      return { ...rootFolder, path: newPath };
+    await tx.insert(fsRoots).values({
+      rootFolderId: rootFolder.id,
+      type,
     });
-  } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to create root");
-  }
+
+    await tx.insert(userPermissions).values({
+      userId: ownerId,
+      folderId: rootFolder.id,
+      permission: "owner",
+    });
+
+    return ok({ ...rootFolder, path: newPath });
+  });
 }
 
 export async function createFolder(
   parentId: number,
   name: string,
   userId: string
-) {
-  // Check write permission on parent
-  const perm = await getEffectivePermission(userId, parentId);
-  if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-  }
+): Promise<Result<FSObject, PermissionError | NotFoundError | UnexpectedError>> {
+  const permResult = await checkReqPermission(userId, parentId, "write", "folder");
+  if (permResult.isErr()) return err(permResult.error);
 
   try {
-    return await db.transaction(async (tx) => {
+    return await safeTransaction(db, async (tx) => {
       const [parent] = await tx
         .select({ path: fsObjects.path })
         .from(fsObjects)
         .where(eq(fsObjects.id, parentId));
 
-      if (!parent) throw new Error("Parent not found");
+      if (!parent) return err({ type: "PARENT_NOT_FOUND" as const, parentId });
 
       const [folder] = await tx
         .insert(fsObjects)
@@ -293,10 +365,11 @@ export async function createFolder(
         .set({ path: newPath })
         .where(eq(fsObjects.id, folder.id));
 
-      return { ...folder, path: newPath };
+      return ok({ ...folder, path: newPath });
     });
   } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to create folder");
+    console.error("Failed to create folder", error);
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
@@ -304,21 +377,18 @@ export async function uploadFile(
   parentId: number,
   name: string,
   userId: string
-) {
-  // Check write permission on parent
-  const perm = await getEffectivePermission(userId, parentId);
-  if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-  }
+): Promise<Result<FSObject, PermissionError | NotFoundError | UnexpectedError>> {
+  const permResult = await checkReqPermission(userId, parentId, "write", "folder");
+  if (permResult.isErr()) return err(permResult.error);
 
   try {
-    return await db.transaction(async (tx) => {
+    return await safeTransaction(db, async (tx) => {
       const [parent] = await tx
         .select({ path: fsObjects.path })
         .from(fsObjects)
         .where(eq(fsObjects.id, parentId));
 
-      if (!parent) throw new Error("Parent not found");
+      if (!parent) return err({ type: "PARENT_NOT_FOUND" as const, parentId });
 
       const [file] = await tx
         .insert(fsObjects)
@@ -335,59 +405,61 @@ export async function uploadFile(
         .set({ path: newPath })
         .where(eq(fsObjects.id, file.id));
 
-      return { ...file, path: newPath };
+      return ok({ ...file, path: newPath });
     });
   } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to upload file");
+    console.error("Failed to upload file", error);
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
 
-export async function getFile(fileId: number, userId: string) {
-  const perm = await getEffectivePermission(userId, fileId);
-  if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.read) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-  }
+export async function getFile(fileId: number, userId: string): Promise<Result<FSObject, PermissionError | NotFoundError | UnexpectedError>> {
+  const permResult = await checkReqPermission(userId, fileId, "read", "file");
+  if (permResult.isErr()) return err(permResult.error);
 
   try {
     const [file] = await db
       .select()
       .from(fsObjects)
       .where(eq(fsObjects.id, fileId));
-    return file;
+
+    if (!file) {
+      return err({ type: "OBJECT_NOT_FOUND", objectId: fileId });
+    }
+
+    return ok(file);
   } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to get file");
+    console.error("Failed to get file", error);
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
-export async function deleteObject(objectId: number, userId: string) {
-  const [obj] = await db
-    .select({ path: fsObjects.path })
-    .from(fsObjects)
-    .where(eq(fsObjects.id, objectId));
-
-  if (!obj) throw new ChatSDKError("not_found:database", "Object not found");
-
-  const parts = obj.path.split(".");
-  const parentId = parts.length > 1 ? parseInt(parts[parts.length - 2]) : null;
-
-  if (!parentId) {
-    const perm = await getEffectivePermission(userId, objectId);
-    if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.admin) {
-      throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-    }
-  } else {
-    const perm = await getEffectivePermission(userId, parentId);
-    if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
-      throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-    }
-  }
-
+export async function deleteObject(objectId: number, userId: string): Promise<Result<boolean, PermissionError | NotFoundError | UnexpectedError>> {
   try {
+    const [obj] = await db
+      .select({ path: fsObjects.path })
+      .from(fsObjects)
+      .where(eq(fsObjects.id, objectId));
+
+    if (!obj) return err({ type: "OBJECT_NOT_FOUND", objectId });
+
+    const parts = obj.path.split(".");
+    const parentId = parts.length > 1 ? parseInt(parts[parts.length - 2]) : null;
+
+    if (!parentId) {
+      const permResult = await checkReqPermission(userId, objectId, "admin", "file");
+      if (permResult.isErr()) return err(permResult.error);
+    } else {
+      const permResult = await checkReqPermission(userId, parentId, "write", "folder");
+      if (permResult.isErr()) return err(permResult.error);
+    }
+
     await db.delete(fsObjects).where(isDescendantOf(fsObjects.path, obj.path));
-    return true;
+    return ok(true);
   } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to delete object");
+    console.error("Failed to delete object", error);
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
@@ -395,29 +467,38 @@ export async function updateObject(
   objectId: number,
   updates: { name?: string; parentId?: number },
   userId: string
-) {
-  const permChecks = [getEffectivePermission(userId, objectId)];
+): Promise<Result<void, PermissionError | NotFoundError | UnexpectedError | ValidationError>> {
+  const objPermResult = await checkReqPermission(userId, objectId, "write", "file");
+  if (objPermResult.isErr()) return err(objPermResult.error);
+
+  // Check new parent permission
   if (updates.parentId) {
-    permChecks.push(getEffectivePermission(userId, updates.parentId));
-  }
-
-  const [perm, newParentPerm] = await Promise.all(permChecks);
-
-  if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.write) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-  }
-
-  if (updates.parentId && (!newParentPerm || PERM_LEVELS[newParentPerm] < PERM_LEVELS.write)) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions on new parent");
+    const parentPermResult = await checkReqPermission(userId, updates.parentId, "write", "folder");
+    if (parentPermResult.isErr()) {
+      // Convert simplified error to specific error if needed, but existing logic used generic NO_PERMISSION.
+      // The original code returned NO_PERMISSION_ON_TARGET for folderId specifically.
+      // We can just return the error from helper, or map it.
+      // Original: return err({ type: "NO_PERMISSION_ON_TARGET", folderId: updates.parentId });
+      // Let's stick to the helper's return for consistency, or manually check if we want exact error type.
+      // To match original behavior exactly:
+      if (parentPermResult.error.type === "NO_PERMISSION") {
+        return err({ type: "NO_PERMISSION_ON_TARGET", folderId: updates.parentId });
+      }
+      return err(parentPermResult.error);
+    }
   }
 
   try {
-    return await db.transaction(async (tx) => {
+    await safeTransaction(db, async (tx) => {
       if (updates.parentId) {
+        // ... Logic remains same ...
+        // safeTransaction expects Result return, but updateObject returns Result<void>.
+        // We need to wrap logic in Result.
+
         const [obj] = await tx.select().from(fsObjects).where(eq(fsObjects.id, objectId));
         const [newParent] = await tx.select().from(fsObjects).where(eq(fsObjects.id, updates.parentId!));
 
-        if (!obj || !newParent) throw new Error("Object or parent not found");
+        if (!obj || !newParent) return err({ type: "OBJECT_NOT_FOUND" as const }); // Logic check
 
         const oldPath = obj.path;
         const newPath = buildChildPath(newParent.path, obj.id);
@@ -441,9 +522,13 @@ export async function updateObject(
       } else if (updates.name) {
         await tx.update(fsObjects).set({ name: updates.name }).where(eq(fsObjects.id, objectId));
       }
+      return ok();
     });
+
+    return ok();
   } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to update object");
+    console.error("Failed to update object", error);
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
@@ -452,18 +537,21 @@ export async function addPermission(
   folderId: number,
   permission: PermType,
   actorId: string
-) {
-  const [actorPerm, targetEffective] = await Promise.all([
-    getEffectivePermission(actorId, folderId),
+): Promise<Result<{ success: true } | { message: string }, PermissionError | NotFoundError | UnexpectedError>> {
+  const [actorPermResult, targetPermResult] = await Promise.all([
+    checkReqPermission(actorId, folderId, "admin", "folder"),
     getEffectivePermission(targetUserId, folderId),
   ]);
 
-  if (!actorPerm || PERM_LEVELS[actorPerm] < PERM_LEVELS.admin) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-  }
+  if (actorPermResult.isErr()) return err(actorPermResult.error);
+  // actorPerm verified by helper
+
+  if (targetPermResult.isErr()) return err(targetPermResult.error);
+  const targetEffective = targetPermResult.value;
 
   if (targetEffective && PERM_LEVELS[targetEffective] >= PERM_LEVELS[permission]) {
-    return { message: "User already has equal or higher permission" };
+    // This is technically a success or a specific "no-op" state, previously returned object
+    return ok({ message: "User already has equal or higher permission" });
   }
 
   try {
@@ -479,17 +567,16 @@ export async function addPermission(
         set: { permission },
       });
 
-    return { success: true };
+    return ok({ success: true });
   } catch (error) {
-    throw new ChatSDKError("bad_request:database", "Failed to add permission");
+    console.error("Failed to add permission", error);
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
-export async function getPermissions(objectID: number, userId: string) {
-  const perm = await getEffectivePermission(userId, objectID);
-  if (!perm || PERM_LEVELS[perm] < PERM_LEVELS.admin) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions");
-  }
+export async function getPermissions(objectID: number, userId: string): Promise<Result<Array<{ userId: string; email: string; permission: PermType }>, PermissionError | NotFoundError | UnexpectedError>> {
+  const permResult = await checkReqPermission(userId, objectID, "admin", "folder");
+  if (permResult.isErr()) return err(permResult.error);
 
   try {
     const permFolderPath = aliasedTable(fsObjects, "permFolderPath");
@@ -550,55 +637,16 @@ export async function getPermissions(objectID: number, userId: string) {
       }
     }
 
-    return Array.from(effectivePerms.values());
+    return ok(Array.from(effectivePerms.values()));
   } catch (error) {
     console.error("Failed to get permissions", error);
-    throw new ChatSDKError("bad_request:database", "Failed to get permissions");
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
-export const getEffectivePermissionSelect = (
-  userId: string,
-  targetTable: typeof fsObjects
-) => {
-  const permFolder = aliasedTable(fsObjects, "pf");
-  const up = aliasedTable(userPermissions, "up");
-  const descFolder = aliasedTable(fsObjects, "df");
-  const upDesc = aliasedTable(userPermissions, "up_desc");
 
-  const ancestorPermSubquery = db
-    .select({ permission: up.permission })
-    .from(up)
-    .innerJoin(permFolder, eq(up.folderId, permFolder.id))
-    .where(
-      and(
-        eq(up.userId, userId),
-        isDescendantOf(targetTable.path, permFolder.path)
-      )
-    )
-    .orderBy(desc(nlevel(permFolder.path)))
-    .limit(1);
 
-  const descendantPermSubquery = db
-    .select({ permission: sql<PermType>`'read'::perm_type` })
-    .from(upDesc)
-    .innerJoin(descFolder, eq(upDesc.folderId, descFolder.id))
-    .where(
-      and(
-        eq(upDesc.userId, userId),
-        isDescendantOf(descFolder.path, targetTable.path),
-        ne(descFolder.id, targetTable.id)
-      )
-    )
-    .limit(1);
 
-  return sql<PermType | null>`(
-    SELECT COALESCE(
-      (${ancestorPermSubquery}),
-      (${descendantPermSubquery})
-    )
-  )`;
-};
 
 export async function getObjects(folderId: number, userId: string) {
   const [folder] = await db
@@ -715,7 +763,7 @@ export async function getTreeHierarchy(
       path: fsObjects.path,
       createdAt: fsObjects.createdAt,
       permission: getEffectivePermissionSelect(userId, fsObjects),
-      level: nlevel(fsObjects.path),
+      level: sql<number>`nlevel(${fsObjects.path})`,
       parentId: sql<number | null>`
         CASE WHEN nlevel(${fsObjects.path}) > 1 
         THEN (subpath(${fsObjects.path}, nlevel(${fsObjects.path}) - 2, 1)::text)::int 
@@ -862,147 +910,184 @@ export async function countFilesUnderFolders(folderIds: number[]): Promise<numbe
 }
 
 /**
+ * Check if any source object names conflict with existing objects in target folder.
+ * Only checks direct children of the target folder.
+ */
+async function checkNameConflicts(
+  sourceNames: string[],
+  targetFolderPath: string
+): Promise<{ name: string; existingId: number }[]> {
+  if (sourceNames.length === 0) return [];
+
+  const existing = await db
+    .select({ id: fsObjects.id, name: fsObjects.name })
+    .from(fsObjects)
+    .where(
+      and(
+        inArray(fsObjects.name, sourceNames),
+        // Direct children of target folder: path matches "targetPath.*{1}"
+        lqueryMatch(fsObjects.path, `${targetFolderPath}.*{1}`)
+      )
+    );
+
+  return existing.map(e => ({ name: e.name, existingId: e.id }));
+}
+
+/**
  * Copy objects to a target folder.
  * Uses topological ordering (ancestors first) to correctly map parent IDs.
  * 
  * @param sourceIds - Array of object IDs to copy
  * @param targetFolderId - The folder to copy into
  * @param userId - The user performing the copy
+ * @param override - If true, delete conflicting objects before copying
  * @returns The number of objects copied
  */
 export async function copyObjects(
   sourceIds: number[],
   targetFolderId: number,
-  userId: string
-): Promise<{ copiedCount: number }> {
+  userId: string,
+  override: boolean = false
+): Promise<Result<{
+  copiedCount: number;
+  mappings: Array<{ oldId: number; oldPath: string; newId: number; newPath: string; type: ObjectType }>;
+}, PermissionError | NotFoundError | ValidationError | UnexpectedError>> {
   if (sourceIds.length === 0) {
-    return { copiedCount: 0 };
+    return ok({ copiedCount: 0, mappings: [] });
   }
 
-  // Check write permission on target folder
-  const targetPerm = await getEffectivePermission(userId, targetFolderId);
-  if (!targetPerm || PERM_LEVELS[targetPerm] < PERM_LEVELS.write) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions on target folder");
-  }
+  // 1. Check permissions
+  const permResult = await checkReqPermission(userId, targetFolderId, "write", "folder");
+  if (permResult.isErr()) return err(permResult.error);
 
-  // Get roots for all objects (sources + target)
-  const allIds = [...sourceIds, targetFolderId];
-  const rootsMap = await getObjectsRoots(allIds);
-  const targetRootId = rootsMap.get(targetFolderId);
-
-  // Validate: can't copy root folders
-  for (const id of sourceIds) {
-    if (await isRootFolder(id)) {
-      throw new ChatSDKError("bad_request:database", "Cannot copy root folders");
-    }
-  }
-
-  // Validate: all sources must be in the same root as target
-  for (const id of sourceIds) {
-    const sourceRootId = rootsMap.get(id);
-    if (sourceRootId !== targetRootId) {
-      throw new ChatSDKError("bad_request:database", "Cannot copy between different collection roots");
-    }
-  }
-
-  // Check read permission on all source objects AND their descendants
   const minPerm = await getMinPermissionForObjects(userId, sourceIds);
   if (!minPerm || PERM_LEVELS[minPerm] < PERM_LEVELS.read) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions on source objects or their contents");
+    return err({ type: "NO_PERMISSION_ON_DESCENDANTS" });
   }
+
+  // 2. Validate move constraints (root check)
+  const allIds = [...sourceIds, targetFolderId];
+  const rootsMap = await getObjectsRoots(allIds);
+  // (root map logic was just unused overhead in copy? targetRootId was unused in original code).
+  // Actually, original code generated `targetRootId` but didn't use it for any check in `copyObjects`.
+  // `moveObjects` used it. `copyObjects` just calculated it. I'll remove it.
 
   try {
-    return await db.transaction(async (tx) => {
-      // Get target folder path
-      const [targetFolder] = await tx
-        .select({ path: fsObjects.path })
-        .from(fsObjects)
-        .where(eq(fsObjects.id, targetFolderId));
+    const [targetFolder] = await db
+      .select({ path: fsObjects.path })
+      .from(fsObjects)
+      .where(eq(fsObjects.id, targetFolderId));
 
-      if (!targetFolder) {
-        throw new Error("Target folder not found");
+    if (!targetFolder) {
+      return err({ type: "PARENT_NOT_FOUND", parentId: targetFolderId });
+    }
+
+    const sourceObjects = await db
+      .select({ id: fsObjects.id, path: fsObjects.path, name: fsObjects.name })
+      .from(fsObjects)
+      .where(inArray(fsObjects.id, sourceIds));
+
+    if (sourceObjects.length === 0) {
+      return ok({ copiedCount: 0, mappings: [] });
+    }
+
+    const conflicts = await checkNameConflicts(sourceObjects.map(o => o.name), targetFolder.path);
+
+    if (conflicts.length > 0 && !override) {
+      return err({ type: "NAME_ALREADY_EXISTS", name: conflicts[0].name, parentId: targetFolderId });
+    }
+
+    const txResult = await safeTransaction(db, async (tx) => {
+      if (conflicts.length > 0 && override) {
+        await deleteConflicts(tx, conflicts);
       }
 
-      // Fetch all source objects and their descendants
-      // We need to get all objects where path <@ any of the source paths
-      const sourceObjects = await tx
-        .select({ id: fsObjects.id, path: fsObjects.path })
-        .from(fsObjects)
-        .where(inArray(fsObjects.id, sourceIds));
-
-      if (sourceObjects.length === 0) {
-        return { copiedCount: 0 };
-      }
-
-      // Build array of source paths for the descendant query
-      const sourcePaths = sourceObjects.map(s => s.path);
-
-      // Fetch all objects to copy (sources + descendants), sorted by path depth
-      const allObjectsToCopy = await tx
-        .select({
-          id: fsObjects.id,
-          name: fsObjects.name,
-          type: fsObjects.type,
-          path: fsObjects.path,
-          level: nlevel(fsObjects.path),
-        })
-        .from(fsObjects)
-        .where(
-          sql`${fsObjects.path} <@ ANY(ARRAY[${sql.join(sourcePaths.map(p => sql`${p}::ltree`), sql`, `)}])`
-        )
-        .orderBy(nlevel(fsObjects.path)); // Ancestors first!
-
-      // Track oldId -> { newId, newPath }
-      const idMapping = new Map<number, { newId: number; newPath: string }>();
-
-      // Process in depth order
-      for (const obj of allObjectsToCopy) {
-        // Insert new object with temporary path
-        const [newObj] = await tx
-          .insert(fsObjects)
-          .values({
-            name: obj.name,
-            type: obj.type,
-            path: "0", // Temporary
-          })
-          .returning({ id: fsObjects.id });
-
-        // Calculate new path
-        let newPath: string;
-
-        // Check if this is a top-level source object
-        if (sourceIds.includes(obj.id)) {
-          // Top-level: goes directly under target folder
-          newPath = `${targetFolder.path}.${newObj.id}`;
-        } else {
-          // Descendant: find old parent and lookup new parent from mapping
-          const pathParts = obj.path.split(".");
-          const oldParentId = parseInt(pathParts[pathParts.length - 2]);
-          const newParent = idMapping.get(oldParentId);
-
-          if (!newParent) {
-            throw new Error(`Parent ${oldParentId} not found in mapping - this shouldn't happen`);
-          }
-
-          newPath = `${newParent.newPath}.${newObj.id}`;
-        }
-
-        // Update path
-        await tx
-          .update(fsObjects)
-          .set({ path: newPath })
-          .where(eq(fsObjects.id, newObj.id));
-
-        // Store mapping
-        idMapping.set(obj.id, { newId: newObj.id, newPath });
-      }
-
-      return { copiedCount: allObjectsToCopy.length };
+      return ok(await performCopy(tx, sourceObjects, sourceIds, targetFolder.path));
     });
+
+    return txResult;
+
   } catch (error) {
     console.error("Failed to copy objects", error);
-    throw new ChatSDKError("bad_request:database", "Failed to copy objects");
+    return err({ type: "UNEXPECTED", cause: error });
   }
+}
+
+async function deleteConflicts(tx: Transaction, conflicts: { existingId: number }[]) {
+  for (const conflict of conflicts) {
+    await tx.delete(fsObjects).where(
+      isDescendantOf(fsObjects.path, sql`(SELECT path FROM fs_objects WHERE id = ${conflict.existingId})`)
+    );
+  }
+}
+
+async function performCopy(
+  tx: Transaction,
+  sourceObjects: { id: number; path: string; name: string }[],
+  sourceIds: number[],
+  targetFolderPath: string
+) {
+  const sourcePaths = sourceObjects.map(s => s.path);
+
+  const allObjectsToCopy = await tx
+    .select({
+      id: fsObjects.id,
+      name: fsObjects.name,
+      type: fsObjects.type,
+      path: fsObjects.path,
+      level: nlevel(fsObjects.path),
+    })
+    .from(fsObjects)
+    .where(
+      sql`${fsObjects.path} <@ ANY(ARRAY[${sql.join(sourcePaths.map(p => sql`${p}::ltree`), sql`, `)}])`
+    )
+    .orderBy(nlevel(fsObjects.path));
+
+  const idMapping = new Map<number, { newId: number; newPath: string; type: ObjectType; oldPath: string }>();
+
+  for (const obj of allObjectsToCopy) {
+    const [newObj] = await tx
+      .insert(fsObjects)
+      .values({
+        name: obj.name,
+        type: obj.type,
+        path: "0",
+      })
+      .returning({ id: fsObjects.id });
+
+    let newPath: string;
+
+    if (sourceIds.includes(obj.id)) {
+      newPath = `${targetFolderPath}.${newObj.id}`;
+    } else {
+      const pathParts = obj.path.split(".");
+      const oldParentId = parseInt(pathParts[pathParts.length - 2]);
+      const newParent = idMapping.get(oldParentId);
+
+      if (!newParent) {
+        throw new Error(`Parent ${oldParentId} not found in mapping - this shouldn't happen`);
+      }
+
+      newPath = `${newParent.newPath}.${newObj.id}`;
+    }
+
+    await tx
+      .update(fsObjects)
+      .set({ path: newPath })
+      .where(eq(fsObjects.id, newObj.id));
+
+    idMapping.set(obj.id, { newId: newObj.id, newPath, type: obj.type, oldPath: obj.path });
+  }
+
+  const mappings = Array.from(idMapping.entries()).map(([oldId, info]) => ({
+    oldId,
+    oldPath: info.oldPath,
+    newId: info.newId,
+    newPath: info.newPath,
+    type: info.type,
+  }));
+
+  return { copiedCount: allObjectsToCopy.length, mappings };
 }
 
 
@@ -1014,105 +1099,441 @@ export async function copyObjects(
  * @param sourceIds - Array of object IDs to move
  * @param targetFolderId - The folder to move into
  * @param userId - The user performing the move
+ * @param override - If true, delete conflicting objects before moving
  * @returns The number of objects moved
  */
 export async function moveObjects(
   sourceIds: number[],
   targetFolderId: number,
-  userId: string
-): Promise<{ movedCount: number }> {
+  userId: string,
+  override: boolean = false
+): Promise<Result<{
+  movedCount: number;
+  mappings: Array<{ id: number; oldPath: string; newPath: string; type: ObjectType }>;
+}, PermissionError | NotFoundError | ValidationError | UnexpectedError>> {
   if (sourceIds.length === 0) {
-    return { movedCount: 0 };
+    return ok({ movedCount: 0, mappings: [] });
   }
 
-  // Check write permission on target folder
-  const targetPerm = await getEffectivePermission(userId, targetFolderId);
-  if (!targetPerm || PERM_LEVELS[targetPerm] < PERM_LEVELS.write) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions on target folder");
+  // 1. Check permissions
+  const permResult = await checkReqPermission(userId, targetFolderId, "write", "folder");
+  if (permResult.isErr()) return err(permResult.error);
+
+  const minPerm = await getMinPermissionForObjects(userId, sourceIds);
+  if (!minPerm || PERM_LEVELS[minPerm] < PERM_LEVELS.write) {
+    return err({ type: "NO_PERMISSION_ON_DESCENDANTS" });
   }
 
-  // Get roots for all objects (sources + target)
+  // 2. Validate move constraints
   const allIds = [...sourceIds, targetFolderId];
   const rootsMap = await getObjectsRoots(allIds);
   const targetRootId = rootsMap.get(targetFolderId);
 
-  // Validate: can't move root folders
   for (const id of sourceIds) {
-    if (await isRootFolder(id)) {
-      throw new ChatSDKError("bad_request:database", "Cannot move root folders");
-    }
-  }
-
-  // Validate: all sources must be in the same root as target
-  for (const id of sourceIds) {
-    const sourceRootId = rootsMap.get(id);
-    if (sourceRootId !== targetRootId) {
-      throw new ChatSDKError("bad_request:database", "Cannot move between different collection roots");
-    }
-  }
-
-  // Check write permission on all source objects AND their descendants
-  const minPerm = await getMinPermissionForObjects(userId, sourceIds);
-  if (!minPerm || PERM_LEVELS[minPerm] < PERM_LEVELS.write) {
-    throw new ChatSDKError("forbidden:database", "Insufficient permissions on source objects or their contents");
+    if (await isRootFolder(id)) return err({ type: "CANNOT_MOVE_ROOT" });
+    if (rootsMap.get(id) !== targetRootId) return err({ type: "CROSS_ROOT_OPERATION" });
   }
 
   try {
-    return await db.transaction(async (tx) => {
-      // Get target folder path
-      const [targetFolder] = await tx
-        .select({ path: fsObjects.path })
-        .from(fsObjects)
-        .where(eq(fsObjects.id, targetFolderId));
+    const [targetFolder] = await db
+      .select({ path: fsObjects.path })
+      .from(fsObjects)
+      .where(eq(fsObjects.id, targetFolderId));
 
-      if (!targetFolder) {
-        throw new Error("Target folder not found");
+    if (!targetFolder) {
+      return err({ type: "PARENT_NOT_FOUND", parentId: targetFolderId });
+    }
+
+    const sourceObjects = await db
+      .select({ id: fsObjects.id, path: fsObjects.path, name: fsObjects.name })
+      .from(fsObjects)
+      .where(inArray(fsObjects.id, sourceIds));
+
+    if (sourceObjects.length === 0) {
+      return ok({ movedCount: 0, mappings: [] });
+    }
+
+    const conflicts = await checkNameConflicts(sourceObjects.map(o => o.name), targetFolder.path);
+
+    if (conflicts.length > 0 && !override) {
+      return err({ type: "NAME_ALREADY_EXISTS", name: conflicts[0].name, parentId: targetFolderId });
+    }
+
+    const txResult = await safeTransaction(db, async (tx) => {
+      if (conflicts.length > 0 && override) {
+        await deleteConflicts(tx, conflicts);
       }
 
-      // Get all source objects
-      const sourceObjects = await tx
-        .select({
-          id: fsObjects.id,
-          path: fsObjects.path,
-          name: fsObjects.name
-        })
-        .from(fsObjects)
-        .where(inArray(fsObjects.id, sourceIds));
-
-      if (sourceObjects.length === 0) {
-        return { movedCount: 0 };
-      }
-
-      // Move each source object and its descendants
-      for (const obj of sourceObjects) {
-        const oldPath = obj.path;
-        const newPath = buildChildPath(targetFolder.path, obj.id);
-
-        // Update the source object's path
-        await tx
-          .update(fsObjects)
-          .set({ path: newPath })
-          .where(eq(fsObjects.id, obj.id));
-
-        // Update all descendants' paths
-        // Replace the old prefix with the new prefix
-        await tx
-          .update(fsObjects)
-          .set({
-            path: sql`${ltreeConcat(ltreeCast(newPath), subpath(fsObjects.path, nlevel(oldPath)))}`
-          })
-          .where(
-            and(
-              isDescendantOf(fsObjects.path, oldPath),
-              ne(fsObjects.id, obj.id)
-            )
-          );
-      }
-
-      return { movedCount: sourceObjects.length };
+      return ok(await performMove(tx, sourceObjects, targetFolder.path));
     });
+
+    return txResult;
+
   } catch (error) {
     console.error("Failed to move objects", error);
-    throw new ChatSDKError("bad_request:database", "Failed to move objects");
+    return err({ type: "UNEXPECTED", cause: error });
   }
 }
+
+async function performMove(
+  tx: Transaction,
+  sourceObjects: { id: number; path: string; name: string }[],
+  targetFolderPath: string
+) {
+  const mappings: Array<{ id: number; oldPath: string; newPath: string; type: ObjectType }> = [];
+
+  for (const obj of sourceObjects) {
+    const oldPath = obj.path;
+    const newPath = buildChildPath(targetFolderPath, obj.id);
+
+    const [objDetails] = await tx
+      .select({ type: fsObjects.type })
+      .from(fsObjects)
+      .where(eq(fsObjects.id, obj.id));
+
+    mappings.push({
+      id: obj.id,
+      oldPath,
+      newPath,
+      type: objDetails.type,
+    });
+
+    await tx
+      .update(fsObjects)
+      .set({ path: newPath })
+      .where(eq(fsObjects.id, obj.id));
+
+    await tx
+      .update(fsObjects)
+      .set({
+        path: sql`${ltreeConcat(ltreeCast(newPath), subpath(fsObjects.path, nlevel(oldPath)))}`
+      })
+      .where(
+        and(
+          isDescendantOf(fsObjects.path, oldPath),
+          ne(fsObjects.id, obj.id)
+        )
+      );
+  }
+
+  return { movedCount: sourceObjects.length, mappings };
+}
+
+// ============================================================================
+// COMBINED DB + S3 OPERATIONS
+// These functions coordinate database and S3 storage within transactions.
+// If S3 fails, the DB transaction is rolled back. Use these exported functions.
+// ============================================================================
+
+// Type for transaction parameter
+type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// -------------------- INTERNAL DB FUNCTIONS (accept tx) --------------------
+
+/** Internal: Create file record in DB */
+async function uploadFileDb(
+  tx: Transaction,
+  parentId: number,
+  fileName: string
+): Promise<Result<FSObject, NotFoundError>> {
+  const [parent] = await tx
+    .select({ path: fsObjects.path })
+    .from(fsObjects)
+    .where(eq(fsObjects.id, parentId));
+
+  if (!parent) return err({ type: "PARENT_NOT_FOUND", parentId });
+
+  const [file] = await tx
+    .insert(fsObjects)
+    .values({ name: fileName, type: "file", path: "0" })
+    .returning();
+
+  const newPath = `${parent.path}.${file.id}`;
+  await tx
+    .update(fsObjects)
+    .set({ path: newPath })
+    .where(eq(fsObjects.id, file.id));
+
+  return ok({ ...file, path: newPath });
+}
+
+/** Internal: Delete object and descendants from DB, returns file paths */
+async function deleteObjectDb(
+  tx: Transaction,
+  objectPath: string
+): Promise<{ path: string; type: string }[]> {
+  const filesToDelete = await tx
+    .select({ path: fsObjects.path, type: fsObjects.type })
+    .from(fsObjects)
+    .where(isDescendantOf(fsObjects.path, objectPath));
+
+  await tx.delete(fsObjects).where(isDescendantOf(fsObjects.path, objectPath));
+
+  return filesToDelete;
+}
+
+// -------------------- INTERNAL S3 FUNCTIONS --------------------
+
+/** Internal: Upload file content to S3 */
+async function uploadFileS3(
+  s3Key: string,
+  fileContent: Buffer,
+  contentType: string
+): Promise<void> {
+  await uploadToS3(s3Key, fileContent, contentType);
+}
+
+/** Internal: Delete files from S3 with concurrency control */
+async function deleteFilesS3(
+  fileKeys: string[]
+): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+  const queue = new PQueue({ concurrency: S3_CONCURRENCY });
+
+  await queue.addAll(
+    fileKeys.map((key) => async () => {
+      try {
+        await deleteFromS3(key);
+        deleted++;
+      } catch {
+        failed++;
+      }
+    })
+  );
+
+  return { deleted, failed };
+}
+
+/** Internal: Copy files in S3 with concurrency control */
+async function copyFilesS3(
+  mappings: Array<{ oldPath: string; newPath: string }>
+): Promise<{ success: number; failed: number }> {
+  let success = 0;
+  let failed = 0;
+  const queue = new PQueue({ concurrency: S3_CONCURRENCY });
+
+  await queue.addAll(
+    mappings.map((m) => async () => {
+      const oldKey = m.oldPath.replace(/\./g, "/");
+      const newKey = m.newPath.replace(/\./g, "/");
+      try {
+        await copyS3Object(oldKey, newKey);
+        success++;
+      } catch {
+        failed++;
+      }
+    })
+  );
+
+  return { success, failed };
+}
+
+/** Internal: Move files in S3 (copy + delete) with concurrency control */
+async function moveFilesS3(
+  mappings: Array<{ oldPath: string; newPath: string }>
+): Promise<{ success: number; failed: number }> {
+  let success = 0;
+  let failed = 0;
+  const queue = new PQueue({ concurrency: S3_CONCURRENCY });
+
+  await queue.addAll(
+    mappings.map((m) => async () => {
+      const oldKey = m.oldPath.replace(/\./g, "/");
+      const newKey = m.newPath.replace(/\./g, "/");
+      try {
+        await copyS3Object(oldKey, newKey);
+        await deleteFromS3(oldKey);
+        success++;
+      } catch {
+        failed++;
+      }
+    })
+  );
+
+  return { success, failed };
+}
+
+// -------------------- EXPORTED TRANSACTIONAL WRAPPERS --------------------
+
+type UploadWithS3Result = Result<FSObject, PermissionError | NotFoundError | S3Error | UnexpectedError>;
+
+/**
+ * Upload a file with content - creates DB record and uploads to S3 in one transaction.
+ * If S3 upload fails, the entire DB transaction is rolled back.
+ */
+export async function uploadFileWithContent(
+  parentId: number,
+  fileName: string,
+  fileContent: Buffer,
+  contentType: string,
+  userId: string
+): Promise<UploadWithS3Result> {
+  // Permission check outside transaction
+  const permResult = await checkReqPermission(userId, parentId, "write", "folder");
+  if (permResult.isErr()) return err(permResult.error);
+
+  try {
+    // Single transaction: DB insert + S3 upload
+    return await safeTransaction(db, async (tx) => {
+      const dbResult = await uploadFileDb(tx, parentId, fileName);
+      if (dbResult.isErr()) return dbResult;
+
+      const fsObject = dbResult.value;
+      const s3Key = fsObjectToS3Key(fsObject);
+
+      // S3 upload inside transaction
+      const s3Result = await ResultAsync.fromPromise(
+        uploadFileS3(s3Key, fileContent, contentType),
+        (error) => ({ type: "S3_UPLOAD_FAILED" as const, key: `${parentId}/*`, cause: error })
+      );
+
+      // safeTransaction handles Err return by rolling back
+      if (s3Result.isErr()) return err(s3Result.error);
+
+      return ok(fsObject);
+    });
+  } catch (error) {
+    // safeTransaction returns Err if callback returns Err or if unexpected error occurs
+    // We can just rely on safeTransaction's error return if it matches Result shape.
+    // However, safeTransaction returns Promise<Result>.
+    // So the try/catch might be redundant if safeTransaction catches everything.
+    // But safeTransaction catches "Unexpected database transaction failure".
+    // If uploadFileS3 threw (which it shouldn't if wrapped in ResultAsync), safeTransaction would catch it and return Err.
+    // So we can simplify this whole block. 
+    console.error("Upload transaction failed (unexpected):", error);
+    return err({ type: "UNEXPECTED", cause: error });
+  }
+}
+
+type DeleteWithS3Result = Result<
+  { deletedCount: number; s3DeletedCount: number; s3FailedCount: number },
+  PermissionError | NotFoundError | UnexpectedError
+>;
+
+/**
+ * Delete object with S3 cleanup - removes from DB first, then S3.
+ * S3 failures don't roll back DB (DB is source of truth for deletes).
+ */
+export async function deleteObjectWithS3(
+  objectId: number,
+  userId: string
+): Promise<DeleteWithS3Result> {
+  // Get object and check permissions
+  const [obj] = await db
+    .select({ id: fsObjects.id, path: fsObjects.path, type: fsObjects.type })
+    .from(fsObjects)
+    .where(eq(fsObjects.id, objectId));
+
+  if (!obj) {
+    return err({ type: "OBJECT_NOT_FOUND", objectId });
+  }
+
+  const parts = obj.path.split(".");
+  const parentId = parts.length > 1 ? parseInt(parts[parts.length - 2]) : null;
+
+  if (!parentId) {
+    const permResult = await checkReqPermission(userId, objectId, "admin", "file");
+    if (permResult.isErr()) return err(permResult.error);
+  } else {
+    const permResult = await checkReqPermission(userId, parentId, "write", "folder");
+    if (permResult.isErr()) return err(permResult.error);
+  }
+
+  try {
+    // Delete from DB and get file paths
+    const deletedFilesResult = await safeTransaction(db, async (tx) => {
+      return ok(await deleteObjectDb(tx, obj.path));
+    });
+
+    if (deletedFilesResult.isErr()) return err(deletedFilesResult.error);
+    const deletedFiles = deletedFilesResult.value;
+
+    // S3 cleanup (best effort - DB is source of truth)
+    const fileKeys = deletedFiles
+      .filter((f) => f.type === "file")
+      .map((f) => fsObjectToS3Key({ path: f.path, type: f.type as ObjectType }));
+
+    const s3Result = await deleteFilesS3(fileKeys);
+
+    return ok({
+      deletedCount: deletedFiles.length,
+      s3DeletedCount: s3Result.deleted,
+      s3FailedCount: s3Result.failed,
+    });
+  } catch (error) {
+    console.error("Delete failed:", error);
+    return err({ type: "UNEXPECTED", cause: error });
+  }
+}
+
+type CopyWithS3Result = Result<
+  { copiedCount: number; s3SuccessCount: number; s3FailCount: number },
+  PermissionError | NotFoundError | ValidationError | UnexpectedError
+>;
+
+/**
+ * Copy objects with S3 - copies in DB, then copies S3 files.
+ * S3 failures are reported but don't roll back DB.
+ */
+export async function copyObjectsWithS3(
+  sourceIds: number[],
+  targetFolderId: number,
+  userId: string,
+  override: boolean = false
+): Promise<CopyWithS3Result> {
+  const dbResult = await copyObjects(sourceIds, targetFolderId, userId, override);
+
+  if (dbResult.isErr()) {
+    return err(dbResult.error);
+  }
+
+  const { copiedCount, mappings } = dbResult.value;
+  const fileMappings = mappings.filter((m) => m.type === "file");
+
+  const s3Result = await copyFilesS3(
+    fileMappings.map((m) => ({ oldPath: m.oldPath, newPath: m.newPath }))
+  );
+
+  return ok({
+    copiedCount,
+    s3SuccessCount: s3Result.success,
+    s3FailCount: s3Result.failed,
+  });
+}
+
+type MoveWithS3Result = Result<
+  { movedCount: number; s3SuccessCount: number; s3FailCount: number },
+  PermissionError | NotFoundError | ValidationError | UnexpectedError
+>;
+
+/**
+ * Move objects with S3 - moves in DB, then moves S3 files (copy + delete).
+ * S3 failures are reported but don't roll back DB.
+ */
+export async function moveObjectsWithS3(
+  sourceIds: number[],
+  targetFolderId: number,
+  userId: string,
+  override: boolean = false
+): Promise<MoveWithS3Result> {
+  const dbResult = await moveObjects(sourceIds, targetFolderId, userId, override);
+
+  if (dbResult.isErr()) {
+    return err(dbResult.error);
+  }
+
+  const { movedCount, mappings } = dbResult.value;
+  const fileMappings = mappings.filter((m) => m.type === "file");
+
+  const s3Result = await moveFilesS3(
+    fileMappings.map((m) => ({ oldPath: m.oldPath, newPath: m.newPath }))
+  );
+
+  return ok({
+    movedCount,
+    s3SuccessCount: s3Result.success,
+    s3FailCount: s3Result.failed,
+  });
+}
+

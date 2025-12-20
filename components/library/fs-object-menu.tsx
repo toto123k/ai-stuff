@@ -1,4 +1,4 @@
-import { EditIcon, ShareIcon, TrashIcon, InfoIcon, CopyIcon, ScissorsIcon, ClipboardPasteIcon } from "lucide-react";
+import { EditIcon, ShareIcon, TrashIcon, InfoIcon, CopyIcon, ScissorsIcon, ClipboardPasteIcon, DownloadIcon } from "lucide-react";
 import { ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@/components/ui/context-menu";
 import { ProtectedMenuItem } from "./protected-menu-item";
 import { FSObject, FSObjectActions } from "./types";
@@ -8,11 +8,9 @@ import { fsObjectStatesAtom, canPasteAtom } from "@/lib/store/library-store";
 interface FSObjectMenuProps {
     object: FSObject;
     actions: FSObjectActions;
-    getSelectedFSObjects?: () => FSObject[];
 }
 
-export const FSObjectMenu = ({ object, actions, getSelectedFSObjects }: FSObjectMenuProps) => {
-    console.log("FSObjectMenu object:", object.name, "permission:", object.permission);
+export const FSObjectMenu = ({ object, actions }: FSObjectMenuProps) => {
     const canWrite = ['write', 'admin', "owner"].includes(object.permission || '');
     const canAdmin = ["owner", "admin"].includes(object.permission!);
     const [states, setStates] = useAtom(fsObjectStatesAtom);
@@ -61,6 +59,10 @@ export const FSObjectMenu = ({ object, actions, getSelectedFSObjects }: FSObject
         });
     };
 
+    const handleDownload = () => {
+        actions.onDownload(object);
+    };
+
     return (
         <ContextMenuContent>
             <ContextMenuItem onClick={() => handleCopyCut("copy")}>
@@ -71,6 +73,9 @@ export const FSObjectMenu = ({ object, actions, getSelectedFSObjects }: FSObject
             </ContextMenuItem>
             <ContextMenuItem onClick={() => actions.onPaste(object)} disabled={!canPaste}>
                 <ClipboardPasteIcon className="ml-2 w-4 h-4" /> הדבק
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleDownload}>
+                <DownloadIcon className="ml-2 w-4 h-4" /> הורד
             </ContextMenuItem>
 
             <ContextMenuSeparator />
@@ -100,11 +105,7 @@ export const FSObjectMenu = ({ object, actions, getSelectedFSObjects }: FSObject
             </ProtectedMenuItem>
 
             <ProtectedMenuItem
-                onClick={() => {
-                    // Get all selected objects if getSelectedFSObjects is available
-                    const allSelected = getSelectedFSObjects?.() ?? [];
-                    actions.onDelete(object, allSelected);
-                }}
+                onClick={() => actions.onDelete(object)}
                 className="text-red-500 focus:text-red-500"
                 disabled={!canWrite}
             >
