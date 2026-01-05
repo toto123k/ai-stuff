@@ -1,0 +1,15 @@
+Starting XLSX to SQLite conversion test...
+Created test Excel file at C:\Users\etay1\OneDrive\Documents\ai-chatbot\test_sales.xlsx
+Converting to SQLite (this involves LLM call)...
+Test FAILED: No such languageModel: gpt-4o-mini
+Stack: AI_NoSuchModelError: No such languageModel: gpt-4o-mini
+    at Object.languageModel (C:\Users\etay1\OneDrive\Documents\ai-chatbot\node_modules\ai\src\registry\custom-provider.ts:66:13)
+    at convertXlsxToSqlite (C:\Users\etay1\OneDrive\Documents\ai-chatbot\lib\converters\xlsx-to-sqlite.ts:49:27)
+    at runTest (C:\Users\etay1\OneDrive\Documents\ai-chatbot\scripts\test-xlsx-conversion.ts:34:15)
+    at fs (C:\Users\etay1\OneDrive\Documents\ai-chatbot\scripts\test-xlsx-conversion.ts:66:1)
+    at Object.<anonymous> (C:\Users\etay1\OneDrive\Documents\ai-chatbot\scripts\test-xlsx-conversion.ts:66:9)
+    at Module._compile (node:internal/modules/cjs/loader:1738:14)
+    at Object.transformer (C:\Users\etay1\OneDrive\Documents\ai-chatbot\node_modules\tsx\dist\register-D46fvsV_.cjs:3:1104)
+    at Module.load (node:internal/modules/cjs/loader:1470:32)
+    at Module._load (node:internal/modules/cjs/loader:1290:12)
+    at TracingChannel.traceSync (node:diagnostics_channel:322:14)

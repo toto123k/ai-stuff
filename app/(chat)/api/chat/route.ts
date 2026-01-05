@@ -1,8 +1,10 @@
 import { geolocation } from "@vercel/functions";
 import {
   convertToModelMessages,
+  CoreMessage,
   createUIMessageStream,
   JsonToSseTransformStream,
+  ModelMessage,
   smoothStream,
   stepCountIs,
   streamText,
@@ -16,6 +18,7 @@ import { fetchModels } from "tokenlens/fetch";
 import { getUsage } from "tokenlens/helpers";
 import { z } from "zod";
 import { ragSearch } from "@/lib/ai/tools/rag-search";
+import { getSpreadsheetSchema, runSpreadsheetQuery } from "@/lib/ai/tools/spreadsheet-tools";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import type { VisibilityType } from "@/components/visibility-selector";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
@@ -88,13 +91,22 @@ export async function POST(request: Request) {
       id,
       message,
       selectedChatModel,
-      selectedVisibilityType
-    }: {
-      id: string;
-      message: ChatMessage;
-      selectedChatModel: ChatModel["id"];
-      selectedVisibilityType: VisibilityType;
+      selectedVisibilityType,
     } = requestBody;
+
+    // Extract selected files from message parts
+    const selectedFiles = (message.parts as any[])
+      .filter((p: any) => p.type === "library-item")
+      .map((p: any) => ({
+        id: p.itemId,
+        name: p.name,
+        folderId: p.folderId,
+        isFile: p.isFile,
+      }));
+
+    // Sanitize message parts for downstream consumption (DB, AI SDK)
+    const sanitizedParts = message.parts.filter((p) => p.type !== "library-item");
+    const sanitizedMessage = { ...message, parts: sanitizedParts };
 
     const session = await auth();
     if (!session?.user) {
@@ -113,12 +125,13 @@ export async function POST(request: Request) {
         return new ChatSDKError("forbidden:chat").toResponse();
       }
     } else {
-      const title = await generateTitleFromUserMessage({ message });
+      const title = await generateTitleFromUserMessage({ message: sanitizedMessage as any });
+      console.log("title", title);
       await saveChat({ id, userId: session.user.id, title, visibility: selectedVisibilityType });
     }
 
     const messagesFromDb = await getMessagesByChatId({ id });
-    const uiMessages = [...convertToUIMessages(messagesFromDb), message];
+    const uiMessages = [...convertToUIMessages(messagesFromDb), sanitizedMessage as any];
 
     const { longitude, latitude, city, country } = geolocation(request);
     const requestHints: RequestHints = { longitude, latitude, city, country };
@@ -127,9 +140,9 @@ export async function POST(request: Request) {
       messages: [
         {
           chatId: id,
-          id: message.id,
+          id: sanitizedMessage.id,
           role: "user",
-          parts: message.parts,
+          parts: sanitizedMessage.parts as any,
           attachments: [],
           createdAt: new Date()
         }
@@ -141,15 +154,76 @@ export async function POST(request: Request) {
 
     let finalMergedUsage: AppUsage | undefined;
 
+    // Type for selected library items
+    type SelectedLibraryItem = {
+      id: string;
+      name: string;
+      folderId?: string | null;
+      isFile: boolean;
+    };
+
+    // Helper to attach selected files to provider metadata
+    const withSelectedFilesMetadata = (
+      modelMessages: ModelMessage[],
+      files: SelectedLibraryItem[],
+      activeUserMessageId: string
+    ): ModelMessage[] => {
+      if (files.length === 0) return modelMessages;
+
+      return modelMessages.map((message) => {
+        const isActiveUserMessage =
+          message.role === "user" && "id" in message && (message as any).id === activeUserMessageId;
+
+        if (!isActiveUserMessage) return message;
+
+        const existingMetadata = (message as any).experimental_providerMetadata ?? {};
+        const existingAppMetadata = existingMetadata.app ?? {};
+
+        return {
+          ...message,
+          experimental_providerMetadata: {
+            ...existingMetadata,
+            app: {
+              ...existingAppMetadata,
+              selectedFiles: files,
+            },
+          },
+        } as ModelMessage;
+      });
+    };
+
+    // Build file context for system prompt so LLM knows what files are available
+    const buildFileContext = (files: SelectedLibraryItem[]): string => {
+      if (files.length === 0) return "";
+
+      const xlsxFiles = files.filter((f) => f.name.endsWith(".xlsx") || f.name.endsWith(".xls"));
+      if (xlsxFiles.length === 0) return "";
+
+      const fileList = xlsxFiles.map((f) => `- "${f.name}" (fileId: ${f.id})`).join("\n");
+      return `\n\n[SELECTED SPREADSHEET FILES]\nThe user has selected these spreadsheet files. Use getSpreadsheetSchema and runSpreadsheetQuery tools to access their data:\n${fileList}`;
+    };
+
+    const fileContext = buildFileContext(selectedFiles as SelectedLibraryItem[]);
+    const baseModelMessages = convertToModelMessages(uiMessages);
+    const modelMessages = withSelectedFilesMetadata(
+      baseModelMessages as ModelMessage[],
+      selectedFiles as SelectedLibraryItem[],
+      sanitizedMessage.id
+    );
+
     const stream = createUIMessageStream({
       execute: ({ writer: dataStream }) => {
         const result = streamText({
           model: myProvider.languageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
-          messages: convertToModelMessages(uiMessages),
-          stopWhen: stepCountIs(5),
+          system: systemPrompt({ selectedChatModel, requestHints }) + fileContext,
+          messages: modelMessages,
+          stopWhen: stepCountIs(10),
           experimental_transform: smoothStream({ chunking: "word" }),
-          tools: { rag: ragSearch },
+          tools: {
+            getSpreadsheetSchema,
+            runSpreadsheetQuery,
+          },
+          toolChoice: "auto",
           experimental_telemetry: { isEnabled: isProductionEnvironment, functionId: "stream-text" },
           onFinish: async ({ usage }) => {
             try {

@@ -2,6 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
+import { useAtomValue } from "jotai";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
@@ -32,6 +33,7 @@ import { MultimodalInput } from "./multimodal-input";
 import { getChatHistoryPaginationKey } from "./sidebar-history";
 import { toast } from "./toast";
 import type { VisibilityType } from "./visibility-selector";
+import { selectedLibraryItemsAtom } from "@/lib/store/lib-selector-store";
 
 export function Chat({
   id,
@@ -55,6 +57,9 @@ export function Chat({
     initialVisibilityType,
   });
 
+  const selectedLibraryItems = useAtomValue(selectedLibraryItemsAtom);
+
+  console.log(selectedLibraryItems)
   const { mutate } = useSWRConfig();
   const { setDataStream } = useDataStream();
 
@@ -63,10 +68,15 @@ export function Chat({
   const [showCreditCardAlert, setShowCreditCardAlert] = useState(false);
   const [currentModelId, setCurrentModelId] = useState(initialChatModel);
   const currentModelIdRef = useRef(currentModelId);
+  const selectedLibraryItemsRef = useRef(selectedLibraryItems);
 
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
+
+  useEffect(() => {
+    selectedLibraryItemsRef.current = selectedLibraryItems;
+  }, [selectedLibraryItems]);
 
   const {
     messages,
@@ -85,10 +95,29 @@ export function Chat({
       api: "/api/chat",
       fetch: fetchWithErrorHandlers,
       prepareSendMessagesRequest(request) {
+        const lastMessage = request.messages.at(-1);
+        const selectedFiles = selectedLibraryItemsRef.current;
+
+        let messageParts = lastMessage?.parts || [];
+
+        // Inject selected library items as parts
+        if (selectedFiles.length > 0) {
+          const libraryParts = selectedFiles.map(item => ({
+            type: "library-item",
+            itemId: item.id,
+            name: item.name,
+            folderId: item.folderId,
+            isFile: item.isFile,
+          }));
+
+          // Need to cast to any because standard MessagePart doesn't have library-item
+          messageParts = [...messageParts, ...libraryParts] as any;
+        }
+
         return {
           body: {
             id: request.id,
-            message: request.messages.at(-1),
+            message: lastMessage ? { ...lastMessage, parts: messageParts } : lastMessage,
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
             ...request.body,

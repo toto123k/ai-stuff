@@ -4,16 +4,19 @@ import postgres from 'postgres';
 import { user, fsObjects, fsRoots, userPermissions, chunks, type ChunkMetadata } from '../lib/db/schema';
 import { eq, sql, and } from 'drizzle-orm';
 
+// Force IPv4 for LocalStack to avoid ECONNREFUSED on Node 18+
+process.env.S3_ENDPOINT = 'http://127.0.0.1:4566';
+
 // Database connection
 const connectionString = process.env.POSTGRES_URL!;
-const client = postgres(connectionString, { max: 20 }); // Increase max connections for concurrency
+const client = postgres(connectionString, { max: 20 });
 const db = drizzle(client);
 
 // ========================================
 // CONFIGURATION PARAMETERS
 // ========================================
 const CONFIG = {
-    EXISTING_USER_UUID: '1a4fd90c-46a2-441c-ab1c-5b93f6d9d317',
+    EXISTING_USER_UUID: '80b01733-f615-46c2-85d2-814de5bcd251',
 
     // User generation
     NEW_USERS_COUNT: 5,
@@ -66,8 +69,6 @@ const pickRandom = <T,>(arr: T[], count: number): T[] => {
 const LOREM_IPSUM = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
 
 function generateDummyContent(type: 'pdf' | 'docx'): { content: Buffer, contentType: string } {
-    // We are just generating text content for now as we don't have pdf-lib/docx installed.
-    // S3 doesn't validate the binary format, so this "simulates" a file.
     const repeated = LOREM_IPSUM.repeat(random(10, 50));
     const buffer = Buffer.from(repeated + `\n\nGenerated as pseudo-${type} file.`);
 
@@ -90,7 +91,6 @@ function generateChunkContent(pageNum: number): string {
     return `[Page ${pageNum}] ${selected.join(" ")} ${LOREM_IPSUM.slice(0, random(100, 300))}`;
 }
 
-// Better queue implementation
 async function runConcurrent<T>(
     tasks: (() => Promise<T>)[],
     concurrency: number
@@ -135,39 +135,76 @@ async function createUsers() {
         });
     }
 
-    // Batch insert users
     const created = await db.insert(user).values(users).returning();
     console.log(`✅ Created ${created.length} users`);
     return created;
 }
 
-async function createFolderWithFiles(
+async function giveOwnerPermission(userId: string, folderId: number) {
+    await db.insert(userPermissions).values({
+        userId,
+        folderId,
+        permission: 'owner',
+    }).onConflictDoNothing();
+}
+
+/**
+ * Creates a folder with the correct path by querying the parent's actual path.
+ * Returns the new folder's ID and path.
+ */
+async function createFolderWithCorrectPath(
     name: string,
     parentId: number | null,
-    depth: number,
-    maxDepth: number,
-    filesPerLayer: number,
     userId: string
-): Promise<number> {
-    // Create folder
+): Promise<{ id: number; path: string }> {
+    // 1. Get parent's actual path (if any)
+    let parentPath: string | null = null;
+    if (parentId !== null) {
+        const [parent] = await db
+            .select({ path: fsObjects.path })
+            .from(fsObjects)
+            .where(eq(fsObjects.id, parentId));
+        parentPath = parent?.path ?? null;
+        if (!parentPath) {
+            throw new Error(`Parent folder ${parentId} not found`);
+        }
+    }
+
+    // 2. Create folder with temporary path
     const [folder] = await db.insert(fsObjects).values({
         name,
         type: 'folder',
         path: '0', // Temporary
     }).returning();
 
-    // Update path
-    const folderPath = parentId ? `${parentId}.${folder.id}` : `${folder.id}`;
+    // 3. Build correct path: either "id" (for root) or "parentPath.id" (for nested)
+    const newPath = parentPath ? `${parentPath}.${folder.id}` : `${folder.id}`;
+
+    // 4. Update with correct path
     await db.execute(sql`
-    UPDATE fs_objects 
-    SET path = ${folderPath}::ltree 
-    WHERE id = ${folder.id}
-  `);
+        UPDATE fs_objects 
+        SET path = ${newPath}::ltree 
+        WHERE id = ${folder.id}
+    `);
 
-    // IMMEDIATELY give owner admin permission so we can upload files into it
-    await giveOwnerAdminPermission(userId, folder.id);
+    // 5. Give owner permission
+    await giveOwnerPermission(userId, folder.id);
 
-    // Create files using real S3 upload
+    return { id: folder.id, path: newPath };
+}
+
+/**
+ * Populates a folder with files and subfolders recursively.
+ */
+async function populateFolderStructure(
+    folderId: number,
+    folderPath: string,
+    depth: number,
+    maxDepth: number,
+    filesPerLayer: number,
+    userId: string
+): Promise<void> {
+    // Upload files
     if (filesPerLayer > 0) {
         const fileTasks = Array.from({ length: filesPerLayer }, async (_, i) => {
             const ext = Math.random() > 0.5 ? 'pdf' : 'docx';
@@ -175,15 +212,13 @@ async function createFolderWithFiles(
             const { content, contentType } = generateDummyContent(ext);
 
             try {
-                // uploadFileWithContent handles DB insert + S3 upload transactionally
-                // It requires 'write' permission on parent, which we just granted.
-                const result = await uploadFileWithContent(folder.id, fileName, content, contentType, userId);
+                const result = await uploadFileWithContent(folderId, fileName, content, contentType, userId);
                 if (result.isErr()) {
                     console.error(`Failed to upload ${fileName}:`, result.error);
                     return;
                 }
 
-                // Create random chunks for this file
+                // Create random chunks
                 const fsObject = result.value;
                 const numChunks = random(CONFIG.MIN_CHUNKS_PER_FILE, CONFIG.MAX_CHUNKS_PER_FILE);
                 const s3Path = fsObject.path.replace(/\./g, '/');
@@ -204,38 +239,28 @@ async function createFolderWithFiles(
             }
         });
 
-        // Execute uploads in parallel (limited by db pool but batch is small)
         await Promise.all(fileTasks);
     }
 
-    // Recurse if we haven't reached max depth
+    // Create subfolders recursively
     if (depth < maxDepth) {
-        const subfolderTasks = Array.from({ length: CONFIG.SUBFOLDERS_PER_LEVEL }, (_, i) => () =>
-            createFolderWithFiles(
+        for (let i = 0; i < CONFIG.SUBFOLDERS_PER_LEVEL; i++) {
+            const subfolder = await createFolderWithCorrectPath(
                 `folder_${depth + 1}_${i + 1}`,
-                folder.id,
+                folderId,
+                userId
+            );
+
+            await populateFolderStructure(
+                subfolder.id,
+                subfolder.path,
                 depth + 1,
                 maxDepth,
                 filesPerLayer,
                 userId
-            )
-        );
-
-        // Run subfolder creation
-        // Note: we use our simple queue/concurrency inside recursion which might limit overall
-        // but sticking to Promise.all here for simplicity of the tree
-        await Promise.all(subfolderTasks.map(task => task()));
+            );
+        }
     }
-
-    return folder.id;
-}
-
-async function giveOwnerAdminPermission(userId: string, folderId: number) {
-    await db.insert(userPermissions).values({
-        userId,
-        folderId,
-        permission: 'owner',
-    }).onConflictDoNothing();
 }
 
 async function createOrganizationalRoots(allUserIds: string[]) {
@@ -245,21 +270,28 @@ async function createOrganizationalRoots(allUserIds: string[]) {
         const index = i + 1;
         const randomOwner = pickRandom(allUserIds, 1)[0];
 
-        const rootFolderId = await createFolderWithFiles(
+        // 1. Create the root folder
+        const rootFolder = await createFolderWithCorrectPath(
             `org_root_${index}`,
             null,
+            randomOwner
+        );
+
+        // 2. Register as fsRoot BEFORE populating
+        await db.insert(fsRoots).values({
+            rootFolderId: rootFolder.id,
+            type: 'organizational',
+        });
+
+        // 3. Populate with files and subfolders
+        await populateFolderStructure(
+            rootFolder.id,
+            rootFolder.path,
             1,
             CONFIG.ORGANIZATIONAL_ROOT_DEPTH,
             CONFIG.ORGANIZATIONAL_ROOT_FILES_PER_LAYER,
             randomOwner
         );
-
-        await db.insert(fsRoots).values({
-            rootFolderId,
-            type: 'organizational',
-        });
-
-        // Permission already given inside createFolderWithFiles, but adding again is safe (onConflictDoNothing)
     });
 
     await runConcurrent(tasks, CONFIG.CONCURRENCY_LIMIT);
@@ -271,38 +303,54 @@ async function populateUserRoots(allUserIds: string[]) {
     console.log(`Setting up roots and populating for ${allUserIds.length} users...`);
 
     const tasks = allUserIds.map((userId) => async () => {
-        // 1. Setup User (Creates Personal and Temp roots)
+        // 1. Setup User (creates Personal and Temp roots via fs-queries.ts)
         const setupRes = await setUpNewUser(userId);
         if (setupRes.isErr()) {
             console.error(`Failed to setup user ${userId}:`, setupRes.error);
             return;
         }
 
-        // 2. Get Roots to populate
-        // We need to query them since setUpNewUser doesn't return the IDs
+        // 2. Get roots
         const personalRootRes = await getPersonalRoot(userId);
-        const tempRootRes = await getTemporaryRoot(userId); // Need to import this
+        const tempRootRes = await getTemporaryRoot(userId);
 
         if (!personalRootRes.rootFolderId || !tempRootRes.rootFolderId) {
             console.error(`Roots not found for user ${userId}`);
             return;
         }
 
-        // 3. Populate Personal Root
+        // 3. Get the personal root's actual path
+        const [personalRootObj] = await db
+            .select({ path: fsObjects.path })
+            .from(fsObjects)
+            .where(eq(fsObjects.id, personalRootRes.rootFolderId));
+
+        if (!personalRootObj) {
+            console.error(`Personal root object not found for user ${userId}`);
+            return;
+        }
+
+        // 4. Populate Personal Root
         const depth = random(CONFIG.PERSONAL_ROOT_MIN_DEPTH, CONFIG.PERSONAL_ROOT_MAX_DEPTH);
         const filesCount = random(CONFIG.PERSONAL_ROOT_MIN_FILES, CONFIG.PERSONAL_ROOT_MAX_FILES);
 
-        // Create subfolders/files INSIDE the personal root
-        await createFolderWithFiles(
+        // Create "Personal Data" folder inside root
+        const personalDataFolder = await createFolderWithCorrectPath(
             `Personal Data`,
             personalRootRes.rootFolderId,
+            userId
+        );
+
+        await populateFolderStructure(
+            personalDataFolder.id,
+            personalDataFolder.path,
             1,
             depth,
             filesCount,
             userId
         );
 
-        // 4. Populate Temporary Root with ~3 files
+        // 5. Populate Temporary Root with files directly
         const tempFilesCount = 3;
         const tempFileTasks = Array.from({ length: tempFilesCount }, async (_, i) => {
             const ext = Math.random() > 0.5 ? 'pdf' : 'docx';
@@ -340,12 +388,10 @@ async function addRandomPermissions(allUserIds: string[]) {
     const allFiles = await db.select().from(fsObjects).where(eq(fsObjects.type, 'file'));
     console.log(`  Found ${allFolders.length} folders and ${allFiles.length} files`);
 
-    // Sort folders by path depth (shallowest first) so we share parents before children
     const sortedFolders = [...allFolders].sort((a, b) =>
         a.path.split('.').length - b.path.split('.').length
     );
 
-    // Track which paths each user has access to (to avoid sharing descendants)
     const userSharedPaths = new Map<string, string[]>();
     for (const userId of allUserIds) {
         userSharedPaths.set(userId, []);
@@ -353,7 +399,6 @@ async function addRandomPermissions(allUserIds: string[]) {
 
     const permissions: { userId: string; folderId: number; permission: 'read' | 'write' | 'admin' }[] = [];
 
-    // Share folders (avoiding nested sharing)
     for (const folder of sortedFolders) {
         if (Math.random() > CONFIG.FOLDER_PERMISSION_CHANCE) continue;
 
@@ -364,15 +409,12 @@ async function addRandomPermissions(allUserIds: string[]) {
         const selectedUsers = pickRandom(allUserIds, numUsers);
 
         for (const userId of selectedUsers) {
-            // Check if user already has access to an ancestor of this folder
             const userPaths = userSharedPaths.get(userId)!;
             const isDescendantOfShared = userPaths.some(sharedPath =>
                 folder.path.startsWith(sharedPath + '.')
             );
 
-            if (isDescendantOfShared) {
-                continue; // Skip - user already has access via parent folder
-            }
+            if (isDescendantOfShared) continue;
 
             const permTypes = ['read', 'write', 'admin'] as const;
             const permission = permTypes[random(0, 2)];
@@ -383,17 +425,13 @@ async function addRandomPermissions(allUserIds: string[]) {
                 permission,
             });
 
-            // Track this path for this user
             userPaths.push(folder.path);
         }
     }
 
-    // Share some individual files FROM other users' personal roots TO the main user
-    // We need to find files that belong to other users' personal roots
     const otherUserIds = allUserIds.filter(id => id !== CONFIG.EXISTING_USER_UUID);
     const mainUserPaths = userSharedPaths.get(CONFIG.EXISTING_USER_UUID) || [];
 
-    // Get personal root paths for other users
     const otherPersonalRootPaths: string[] = [];
     for (const userId of otherUserIds) {
         const personalRoot = await db.select({ path: fsObjects.path })
@@ -411,7 +449,6 @@ async function addRandomPermissions(allUserIds: string[]) {
         }
     }
 
-    // Filter files to only those inside other users' personal roots
     const filesFromOthersPersonalRoots = allFiles.filter(file =>
         otherPersonalRootPaths.some(rootPath =>
             file.path === rootPath || file.path.startsWith(rootPath + '.')
@@ -420,19 +457,16 @@ async function addRandomPermissions(allUserIds: string[]) {
 
     console.log(`  Files in other users' personal roots: ${filesFromOthersPersonalRoots.length}`);
 
-    const FILE_SHARE_CHANCE = 0.5; // 50% chance for eligible files
+    const FILE_SHARE_CHANCE = 0.5;
     let filesShared = 0;
     for (const file of filesFromOthersPersonalRoots) {
         if (Math.random() > FILE_SHARE_CHANCE) continue;
 
-        // Check if main user already has access via a shared folder
         const isDescendantOfShared = mainUserPaths.some(sharedPath =>
             file.path.startsWith(sharedPath + '.')
         );
 
-        if (isDescendantOfShared) {
-            continue; // Skip - main user already has access via parent folder
-        }
+        if (isDescendantOfShared) continue;
 
         const permTypes = ['read', 'write', 'admin'] as const;
         const permission = permTypes[random(0, 2)];
@@ -460,20 +494,10 @@ async function cleanup() {
     console.log('🧹 Cleaning up existing file system data...');
 
     await db.delete(chunks);
-    // console.log('  - Deleted chunks');
-
     await db.delete(userPermissions);
-    // console.log('  - Deleted permissions');
-
     await db.delete(fsRoots);
-    // console.log('  - Deleted roots');
-
     await db.delete(fsObjects);
-    // console.log('  - Deleted fs objects');
-
-    // Delete test users but keep the main user
     await db.execute(sql`DELETE FROM "User" WHERE email LIKE 'user%@test.com'`);
-    // console.log('  - Deleted test users');
 
     console.log('✅ Cleanup complete\n');
 }

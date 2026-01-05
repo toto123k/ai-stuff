@@ -26,6 +26,7 @@ import {
   type RootType,
   type FSObject,
   type ChunkMetadata,
+  type FSObjectMetadata,
 } from "./schema";
 import { safeTransaction } from "./safe-transaction";
 
@@ -38,6 +39,7 @@ import {
   fsObjectToS3Key,
 } from "@/lib/s3";
 import PQueue from "p-queue";
+import { PERM_LEVELS } from "@/lib/permissions";
 
 // S3 concurrency limit
 const S3_CONCURRENCY = 5;
@@ -57,15 +59,9 @@ import {
 } from "./ltree-operators";
 import { caseWhen } from "./case-operators";
 
+console.log("DEBUG: fs-queries.ts initializing. POSTGRES_URL:", process.env.POSTGRES_URL ? "DEFINED" : "UNDEFINED");
 const client = postgres(process.env.POSTGRES_URL!);
 const db = drizzle(client);
-
-const PERM_LEVELS: Record<PermType, number> = {
-  read: 1,
-  write: 2,
-  admin: 3,
-  owner: 4,
-};
 
 
 
@@ -197,7 +193,20 @@ async function checkStorageLimit(
   const rootId = getRootIdFromPath(parent.path);
   const storageInfo = await getRootStorageInfo(rootId);
 
-  if (!storageInfo) return err({ type: "ROOT_NOT_FOUND", rootType: "unknown" });
+  // Debug logging for ROOT_NOT_FOUND
+  if (!storageInfo) {
+    console.error(`[checkStorageLimit] ROOT_NOT_FOUND debug:`, {
+      parentId,
+      parentPath: parent.path,
+      derivedRootId: rootId,
+      fsRootsFound: !!storageInfo
+    });
+    // Double check specific root
+    const [debugRoot] = await db.select().from(fsRoots).where(eq(fsRoots.rootFolderId, rootId));
+    console.error(`[checkStorageLimit] Double check fsRoots for ${rootId}:`, debugRoot);
+
+    return err({ type: "ROOT_NOT_FOUND", rootType: "unknown" });
+  }
 
   const newTotal = storageInfo.usedBytes + fileSizeBytes;
   if (newTotal > storageInfo.maxBytes) {
@@ -558,6 +567,19 @@ export async function getFile(fileId: number, userId: string): Promise<Result<FS
   }
 }
 
+/**
+ * Update the metadata of a file (used for caching spreadsheet schema, etc.)
+ */
+export async function updateFileMetadata(
+  fileId: number,
+  metadata: FSObjectMetadata
+): Promise<void> {
+  await db
+    .update(fsObjects)
+    .set({ metadata })
+    .where(eq(fsObjects.id, fileId));
+}
+
 export async function deleteObject(objectId: number, userId: string): Promise<Result<boolean, PermissionError | NotFoundError | UnexpectedError>> {
   try {
     const [obj] = await db
@@ -672,32 +694,77 @@ export async function addPermission(
   if (targetPermResult.isErr()) return err(targetPermResult.error);
   const targetEffective = targetPermResult.value;
 
+  // Cannot add a permission that is equal or lower than what user already has from ancestors
   if (targetEffective && PERM_LEVELS[targetEffective] >= PERM_LEVELS[permission]) {
-    // This is technically a success or a specific "no-op" state, previously returned object
-    return ok({ message: "User already has equal or higher permission" });
+    return ok({ message: "User already has equal or higher permission from parent folder" });
   }
 
   try {
-    await db
-      .insert(userPermissions)
-      .values({
-        userId: targetUserId,
-        folderId,
-        permission,
-      })
-      .onConflictDoUpdate({
-        target: [userPermissions.userId, userPermissions.folderId],
-        set: { permission },
-      });
+    return await safeTransaction(db, async (tx) => {
+      // Get the path of this folder
+      const [folder] = await tx
+        .select({ path: fsObjects.path })
+        .from(fsObjects)
+        .where(eq(fsObjects.id, folderId));
 
-    return ok({ success: true });
+      if (!folder) {
+        return err({ type: "OBJECT_NOT_FOUND" as const, objectId: folderId });
+      }
+
+      // Insert or update the permission
+      await tx
+        .insert(userPermissions)
+        .values({
+          userId: targetUserId,
+          folderId,
+          permission,
+        })
+        .onConflictDoUpdate({
+          target: [userPermissions.userId, userPermissions.folderId],
+          set: { permission },
+        });
+
+      // Clean up any LOWER permissions this user has on descendant folders
+      // Get all permissions for this user on descendant folders
+      const descendantPerms = aliasedTable(fsObjects, "descendantPerms");
+      const lowerPermissions = Object.entries(PERM_LEVELS)
+        .filter(([_, level]) => level < PERM_LEVELS[permission])
+        .map(([perm]) => perm as PermType);
+
+      // Only run delete if there are lower permissions to clean up
+      if (lowerPermissions.length > 0) {
+        await tx
+          .delete(userPermissions)
+          .where(
+            and(
+              eq(userPermissions.userId, targetUserId),
+              exists(
+                tx
+                  .select({ one: sql<number>`1` })
+                  .from(descendantPerms)
+                  .where(
+                    and(
+                      eq(descendantPerms.id, userPermissions.folderId),
+                      // Descendant path (child), not including self
+                      sql`${descendantPerms.path} <@ ${folder.path}::ltree`,
+                      sql`${descendantPerms.path} != ${folder.path}::ltree`,
+                    )
+                  )
+              ),
+              inArray(userPermissions.permission, lowerPermissions)
+            )
+          );
+      }
+
+      return ok({ success: true });
+    });
   } catch (error) {
     console.error("Failed to add permission", error);
     return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
-export async function getPermissions(objectID: number, userId: string): Promise<Result<Array<{ userId: string; email: string; permission: PermType }>, PermissionError | NotFoundError | UnexpectedError>> {
+export async function getPermissions(objectID: number, userId: string): Promise<Result<Array<{ userId: string; email: string; permission: PermType; folderId: number; folderName: string; isDirect: boolean; inheritedPermission: PermType | null }>, PermissionError | NotFoundError | UnexpectedError>> {
   const permResult = await checkReqPermission(userId, objectID, "admin", "folder");
   if (permResult.isErr()) return err(permResult.error);
 
@@ -705,6 +772,7 @@ export async function getPermissions(objectID: number, userId: string): Promise<
     const permFolderPath = aliasedTable(fsObjects, "permFolderPath");
     const targetObj = aliasedTable(fsObjects, "targetObj");
     const ancestorObj = aliasedTable(fsObjects, "ancestorObj");
+    const permFolderInfo = aliasedTable(fsObjects, "permFolderInfo");
 
     const permFolderPathSubquery = sql`(${db
       .select({ path: permFolderPath.path })
@@ -727,10 +795,12 @@ export async function getPermissions(objectID: number, userId: string): Promise<
         permission: userPermissions.permission,
         folderId: userPermissions.folderId,
         email: user.email,
+        folderName: permFolderInfo.name,
         depth: nlevel(permFolderPathSubquery),
       })
       .from(userPermissions)
       .innerJoin(user, eq(userPermissions.userId, user.id))
+      .innerJoin(permFolderInfo, eq(permFolderInfo.id, userPermissions.folderId))
       .where(
         exists(
           db
@@ -745,28 +815,263 @@ export async function getPermissions(objectID: number, userId: string): Promise<
         )
       );
 
-    const effectivePerms = new Map<string, { userId: string; email: string; permission: PermType }>();
+    // Group permissions by user to find the highest one
+    const userPermMap = new Map<string, {
+      directPerm: typeof result[0] | null;
+      inheritedPerms: typeof result;
+    }>();
 
     for (const p of result) {
-      const current = effectivePerms.get(p.userId);
-      const newLevel = PERM_LEVELS[p.permission];
+      const existing = userPermMap.get(p.userId) || { directPerm: null, inheritedPerms: [] };
 
-      if (!current || newLevel > PERM_LEVELS[current.permission]) {
-        effectivePerms.set(p.userId, {
-          userId: p.userId,
-          email: p.email,
-          permission: p.permission,
+      if (p.folderId === objectID) {
+        // Direct permission on this folder
+        existing.directPerm = p;
+      } else {
+        // Inherited from parent
+        existing.inheritedPerms.push(p);
+      }
+
+      userPermMap.set(p.userId, existing);
+    }
+
+    // Build final list - ONE entry per user with highest permission
+    const permissionsWithMeta: Array<{
+      userId: string;
+      email: string;
+      permission: PermType;
+      folderId: number;
+      folderName: string;
+      isDirect: boolean;
+      inheritedPermission: PermType | null;
+    }> = [];
+
+    for (const [, data] of userPermMap) {
+      // Find highest inherited permission
+      let highestInheritedPerm: PermType | null = null;
+      let highestInheritedEntry: typeof result[0] | null = null;
+
+      for (const p of data.inheritedPerms) {
+        const perm = p.permission as PermType;
+        if (!highestInheritedPerm || PERM_LEVELS[perm] > PERM_LEVELS[highestInheritedPerm]) {
+          highestInheritedPerm = perm;
+          highestInheritedEntry = p;
+        }
+      }
+
+      // Determine which permission to show (direct takes precedence, then highest inherited)
+      if (data.directPerm) {
+        // User has direct permission on this folder
+        permissionsWithMeta.push({
+          userId: data.directPerm.userId,
+          email: data.directPerm.email,
+          permission: data.directPerm.permission as PermType,
+          folderId: data.directPerm.folderId,
+          folderName: data.directPerm.folderName,
+          isDirect: true,
+          inheritedPermission: highestInheritedPerm,
+        });
+      } else if (highestInheritedEntry) {
+        // User only has inherited permission
+        permissionsWithMeta.push({
+          userId: highestInheritedEntry.userId,
+          email: highestInheritedEntry.email,
+          permission: highestInheritedEntry.permission as PermType,
+          folderId: highestInheritedEntry.folderId,
+          folderName: highestInheritedEntry.folderName,
+          isDirect: false,
+          inheritedPermission: highestInheritedPerm,
         });
       }
     }
 
-    return ok(Array.from(effectivePerms.values()));
+    return ok(permissionsWithMeta);
   } catch (error) {
     console.error("Failed to get permissions", error);
     return err({ type: "UNEXPECTED", cause: error });
   }
 }
 
+/**
+ * Update an existing permission. Requires admin on the folder.
+ * - Cannot decrease permission below what user has from parent folders
+ * - When increasing permission, cleans up lower permissions on descendant folders
+ */
+export async function updatePermission(
+  targetUserId: string,
+  folderId: number,
+  newPermission: PermType,
+  actorId: string
+): Promise<Result<{ success: true }, PermissionError | NotFoundError | UnexpectedError>> {
+  // Cannot set owner permission via update
+  if (newPermission === "owner") {
+    return err({ type: "NO_PERMISSION", resource: "folder", required: "owner" });
+  }
+
+  const actorPermResult = await checkReqPermission(actorId, folderId, "admin", "folder");
+  if (actorPermResult.isErr()) return err(actorPermResult.error);
+
+  try {
+    return await safeTransaction(db, async (tx) => {
+      // Check if user has direct permission on this folder
+      const [existing] = await tx
+        .select()
+        .from(userPermissions)
+        .where(
+          and(
+            eq(userPermissions.userId, targetUserId),
+            eq(userPermissions.folderId, folderId)
+          )
+        );
+
+      if (!existing) {
+        return err({ type: "USER_NOT_FOUND" as const, userId: targetUserId });
+      }
+
+      // Cannot modify owner permission
+      if (existing.permission === "owner") {
+        return err({ type: "NO_PERMISSION" as const, resource: "folder" as const, required: "owner" as const });
+      }
+
+      // Get folder path for ancestor/descendant checks
+      const [folder] = await tx
+        .select({ path: fsObjects.path })
+        .from(fsObjects)
+        .where(eq(fsObjects.id, folderId));
+
+      if (!folder) {
+        return err({ type: "OBJECT_NOT_FOUND" as const, objectId: folderId });
+      }
+
+      // Check what permission user has from PARENT folders (not including this one)
+      const ancestorFolder = aliasedTable(fsObjects, "ancestorFolder");
+      const parentPerms = await tx
+        .select({ permission: userPermissions.permission })
+        .from(userPermissions)
+        .innerJoin(ancestorFolder, eq(ancestorFolder.id, userPermissions.folderId))
+        .where(
+          and(
+            eq(userPermissions.userId, targetUserId),
+            // Ancestor of current folder (parent), not including self
+            sql`${folder.path}::ltree <@ ${ancestorFolder.path}`,
+            sql`${ancestorFolder.path} != ${folder.path}::ltree`
+          )
+        );
+
+      // Find highest parent permission
+      let highestParentPerm: PermType | null = null;
+      for (const pp of parentPerms) {
+        const ppPerm = pp.permission as PermType;
+        if (!highestParentPerm || PERM_LEVELS[ppPerm] > PERM_LEVELS[highestParentPerm]) {
+          highestParentPerm = ppPerm;
+        }
+      }
+
+      // Cannot set permission lower than what user has from parent
+      if (highestParentPerm && PERM_LEVELS[newPermission] < PERM_LEVELS[highestParentPerm]) {
+        return err({
+          type: "NO_PERMISSION" as const,
+          resource: "folder" as const,
+          required: highestParentPerm
+        });
+      }
+
+      // Update the permission
+      await tx
+        .update(userPermissions)
+        .set({ permission: newPermission })
+        .where(
+          and(
+            eq(userPermissions.userId, targetUserId),
+            eq(userPermissions.folderId, folderId)
+          )
+        );
+
+      // Clean up any LOWER permissions on descendant folders
+      const descendantPerms = aliasedTable(fsObjects, "descendantPerms");
+      const lowerPermissions = Object.entries(PERM_LEVELS)
+        .filter(([_, level]) => level < PERM_LEVELS[newPermission])
+        .map(([perm]) => perm as PermType);
+
+      // Only run delete if there are lower permissions to clean up
+      if (lowerPermissions.length > 0) {
+        await tx
+          .delete(userPermissions)
+          .where(
+            and(
+              eq(userPermissions.userId, targetUserId),
+              exists(
+                tx
+                  .select({ one: sql<number>`1` })
+                  .from(descendantPerms)
+                  .where(
+                    and(
+                      eq(descendantPerms.id, userPermissions.folderId),
+                      sql`${descendantPerms.path} <@ ${folder.path}::ltree`,
+                      sql`${descendantPerms.path} != ${folder.path}::ltree`,
+                    )
+                  )
+              ),
+              inArray(userPermissions.permission, lowerPermissions)
+            )
+          );
+      }
+
+      return ok({ success: true });
+    });
+  } catch (error) {
+    console.error("Failed to update permission", error);
+    return err({ type: "UNEXPECTED", cause: error });
+  }
+}
+
+/**
+ * Remove a permission. Requires admin on the folder.
+ */
+export async function removePermission(
+  targetUserId: string,
+  folderId: number,
+  actorId: string
+): Promise<Result<{ success: true }, PermissionError | NotFoundError | UnexpectedError>> {
+  const actorPermResult = await checkReqPermission(actorId, folderId, "admin", "folder");
+  if (actorPermResult.isErr()) return err(actorPermResult.error);
+
+  try {
+    // Check if user has direct permission on this folder
+    const [existing] = await db
+      .select()
+      .from(userPermissions)
+      .where(
+        and(
+          eq(userPermissions.userId, targetUserId),
+          eq(userPermissions.folderId, folderId)
+        )
+      );
+
+    if (!existing) {
+      return err({ type: "USER_NOT_FOUND", userId: targetUserId });
+    }
+
+    // Cannot remove owner permission
+    if (existing.permission === "owner") {
+      return err({ type: "NO_PERMISSION", resource: "folder", required: "owner" });
+    }
+
+    await db
+      .delete(userPermissions)
+      .where(
+        and(
+          eq(userPermissions.userId, targetUserId),
+          eq(userPermissions.folderId, folderId)
+        )
+      );
+
+    return ok({ success: true });
+  } catch (error) {
+    console.error("Failed to remove permission", error);
+    return err({ type: "UNEXPECTED", cause: error });
+  }
+}
 
 
 

@@ -27,7 +27,6 @@ export const LibTreeView = ({ className, onSelect }: LibTreeViewProps) => {
     const [, setHalfSelectedIds] = useAtom(libHalfSelectedIdsAtom);
     const disabledIds = useAtomValue(disabledIdsAtom);
 
-    const isFirstRender = useRef(true);
 
     const handleLoadData = useCallback(async ({ element }: { element: INode & { metadata?: TreeNodeMetadata } }) => {
         if (element.children.length > 0 || element.metadata?.isLoaded) return;
@@ -38,11 +37,6 @@ export const LibTreeView = ({ className, onSelect }: LibTreeViewProps) => {
     }, [loadNode]);
 
     const handleSelect = useCallback(({ treeState }: { treeState: { selectedIds: Set<string | number>; halfSelectedIds: Set<string | number>, disabledIds: Set<string | number> } }) => {
-        if (isFirstRender.current) {
-            isFirstRender.current = false;
-            return;
-        }
-
         const newSelectedIds = Array.from(treeState.selectedIds)
             .filter((id) => !disabledIds.has(id.toString()))
             .map(String);

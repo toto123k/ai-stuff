@@ -27,8 +27,8 @@ type ragSearchTool = InferUITool<typeof ragSearch>;
 
 export type ChatTools = {
   getWeather: weatherTool;
-  createDocument: createDocumentTool;
-  updateDocument: updateDocumentTool;
+  // createDocument: createDocumentTool;
+  // updateDocument: updateDocumentTool;
   requestSuggestions: requestSuggestionsTool;
   rag: ragSearchTool;
 };

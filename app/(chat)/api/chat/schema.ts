@@ -12,7 +12,23 @@ const filePartSchema = z.object({
   url: z.string().url(),
 });
 
-const partSchema = z.union([textPartSchema, filePartSchema]);
+const libraryItemPartSchema = z.object({
+  type: z.enum(["library-item"]),
+  itemId: z.string(),
+  name: z.string(),
+  folderId: z.number().optional(),
+  isFile: z.boolean().optional(),
+});
+
+const partSchema = z.union([textPartSchema, filePartSchema, libraryItemPartSchema]);
+
+// Selected library file for context
+const selectedFileSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  folderId: z.number().optional(),
+  isFile: z.boolean().optional(),
+});
 
 export const postRequestBodySchema = z.object({
   id: z.string().uuid(),
@@ -23,6 +39,8 @@ export const postRequestBodySchema = z.object({
   }),
   selectedChatModel: z.enum(["chat-model", "chat-model-reasoning"]),
   selectedVisibilityType: z.enum(["public", "private"]),
+  selectedFiles: z.array(selectedFileSchema).optional(),
 });
 
 export type PostRequestBody = z.infer<typeof postRequestBodySchema>;
+export type SelectedFile = z.infer<typeof selectedFileSchema>;

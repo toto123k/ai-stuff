@@ -9,7 +9,7 @@ function requireEnv(name: string): string {
 }
 
 const openrouter = createOpenRouter({
-  apiKey: "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",
+  apiKey: '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',
   baseURL: 'https://openrouter.ai/api/v1',
   headers: {
     'HTTP-Referer': process.env.APP_PUBLIC_URL ?? 'http://localhost:3000',

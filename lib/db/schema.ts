@@ -195,7 +195,37 @@ export type ObjectType = (typeof objectTypeEnum.enumValues)[number];
 export type RootType = (typeof rootTypeEnum.enumValues)[number];
 export type PermType = (typeof permTypeEnum.enumValues)[number];
 
-// 3. Filesystem Objects Table (The Tree)
+// Spreadsheet metadata types
+export interface SpreadsheetColumnSchema {
+  originalName: string;
+  name: string;
+  type: 'string' | 'int64' | 'float64' | 'boolean' | 'timestamp';
+  nullable: boolean;
+}
+
+export interface SpreadsheetSheetSchema {
+  originalName: string;
+  tableName: string;
+  rowCount: number;
+  columns: SpreadsheetColumnSchema[];
+  partCount: number;
+  totalBytes: number;
+}
+
+export interface SpreadsheetSchema {
+  version: 1;
+  convertedAt: string;
+  compression: 'zstd';
+  compressionLevel: number;
+  totalBytes: number;
+  conversionTimeMs: number;
+  sheets: SpreadsheetSheetSchema[];
+}
+
+export interface FSObjectMetadata {
+  spreadsheetSchema?: SpreadsheetSchema;
+}
+
 // 3. Filesystem Objects Table (The Tree)
 export const fsObjects = pgTable('fs_objects', {
   id: serial('id').primaryKey(),
@@ -207,6 +237,8 @@ export const fsObjects = pgTable('fs_objects', {
   expiresAt: timestamp('expires_at'),
   fileSize: bigint('file_size', { mode: 'number' }),
   mimeType: text('mime_type'),
+  // Generic metadata JSONB for spreadsheet schema, etc.
+  metadata: jsonb('metadata').$type<FSObjectMetadata | null>(),
 }, (table) => ({
   pathGistIdx: index('path_gist_idx').using('gist', table.path),
   expiresAtIdx: index('fs_objects_expires_at_idx').on(table.expiresAt),

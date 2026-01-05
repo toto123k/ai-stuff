@@ -3,12 +3,12 @@
     "id": "chat-model",
     "name": "Deepseek",
     "description": "Advanced multimodal model with vision and text capabilities",
-    "slug": "deepseek/deepseek-v3.2"
+    "slug": "openai/gpt-oss-120b"
   },
   {
     "id": "chat-model-reasoning",
     "name": "Claude Sonnet 3.5",
     "description": "Anthropic general-purpose reasoning model",
-    "slug": "anthropic/claude-3.5-sonnet"
+    "slug": "openai/gpt-oss-120b"
   }
 ]

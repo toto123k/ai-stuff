@@ -8,8 +8,11 @@ import {
   eq,
   gt,
   gte,
+  ilike,
   inArray,
   lt,
+  ne,
+  or,
   type SQL,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -100,6 +103,7 @@ export async function saveChat({
       visibility,
     });
   } catch (_error) {
+    console.log("Error saving chat:", _error);
     throw new ChatSDKError("bad_request:database", "Failed to save chat");
   }
 }
@@ -588,6 +592,49 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to get stream ids by chat id"
+    );
+  }
+}
+
+/**
+ * Search users by email or ID (partial match).
+ * Used for autocomplete in share dialog.
+ */
+export async function searchUsers({
+  query,
+  limit = 10,
+  excludeUserId,
+}: {
+  query: string;
+  limit?: number;
+  excludeUserId?: string;
+}): Promise<Array<{ id: string; email: string }>> {
+  try {
+    if (!query || query.trim().length < 2) {
+      return [];
+    }
+
+    const searchPattern = `%${query.trim()}%`;
+
+    const results = await db
+      .select({ id: user.id, email: user.email })
+      .from(user)
+      .where(
+        and(
+          or(
+            ilike(user.email, searchPattern),
+          ),
+          excludeUserId ? ne(user.id, excludeUserId) : undefined
+        )
+      )
+      .limit(limit);
+
+    return results;
+  } catch (_error) {
+    console.error("Failed to search users", _error);
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to search users"
     );
   }
 }

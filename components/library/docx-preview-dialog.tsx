@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { renderAsync } from "docx-preview";
-import { LoaderIcon } from "lucide-react";
+"use client";
+
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { FSObject } from "./types";
-import { toast } from "sonner";
+import { LoaderIcon, AlertCircle } from "lucide-react";
+import { useState, useEffect } from "react";
 
 interface DocxPreviewDialogProps {
     isOpen: boolean;
@@ -11,84 +11,88 @@ interface DocxPreviewDialogProps {
     file: FSObject | null;
 }
 
-export function DocxPreviewDialog({ isOpen, onOpenChange, file }: DocxPreviewDialogProps) {
-    const containerRef = useRef<HTMLDivElement>(null);
-    const [isLoading, setIsLoading] = useState(false);
+export const DocxPreviewDialog = ({ isOpen, onOpenChange, file }: DocxPreviewDialogProps) => {
+    const [isLoading, setIsLoading] = useState(true);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
+    // Fetch the S3 presigned URL when dialog opens
     useEffect(() => {
         if (!isOpen || !file) {
+            setPreviewUrl(null);
+            setError(null);
             return;
         }
 
-        const loadDocx = async () => {
+        const fetchPreviewUrl = async () => {
             setIsLoading(true);
             setError(null);
-
-            // Clear previous content
-            if (containerRef.current) {
-                containerRef.current.innerHTML = "";
-            }
+            setPreviewUrl(null);
 
             try {
-                // Fetch the file content directly via proxy to avoid CORS
-                const res = await fetch(`/api/fs/download?fileId=${file.id}&proxy=true`);
-                if (!res.ok) {
-                    throw new Error("Failed to fetch file content");
+                const extension = file.name.split('.').pop()?.toLowerCase();
+                const isPdf = extension === 'pdf';
+
+                // Fetch the presigned S3 URL from the download API
+                const response = await fetch(`/api/fs/download?fileId=${file.id}&download=true`);
+                if (!response.ok) {
+                    throw new Error("Failed to get file URL");
                 }
-                const blob = await res.blob();
 
-                if (containerRef.current) {
-                    await renderAsync(blob, containerRef.current, undefined, {
-                        inWrapper: true,
-                        ignoreWidth: false,
-                        ignoreHeight: false,
-                        ignoreFonts: false,
-                        breakPages: true,
-                        ignoreLastRenderedPageBreak: true,
-                        experimental: false,
-                        trimXmlDeclaration: true,
-                        useBase64URL: false,
+                const data = await response.json();
+                const s3Url = data.url;
 
-                    });
+                if (isPdf) {
+                    // For PDFs, use the S3 URL directly
+                    setPreviewUrl(s3Url);
+                } else {
+                    // For Office files, use Office Online Viewer with the S3 URL
+                    setPreviewUrl(`https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(s3Url)}`);
                 }
             } catch (err) {
-                console.error("Error previewing DOCX:", err);
-                const msg = err instanceof Error ? err.message : "Failed to load document preview";
-                setError(msg);
-                toast.error(msg);
-            } finally {
-                setIsLoading(false);
+                setError(err instanceof Error ? err.message : "Failed to load preview");
             }
         };
 
-        loadDocx();
+        fetchPreviewUrl();
     }, [isOpen, file]);
+
+    if (!file) return null;
+
+    const isPdf = file.name.toLowerCase().endsWith('.pdf');
 
     return (
         <Dialog open={isOpen} onOpenChange={onOpenChange}>
-            <DialogContent className="max-w-6xl h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-                <DialogHeader dir="ltr">
-                    <DialogTitle>{file?.name || "תצוגה מקדימה"}</DialogTitle>
+            <DialogContent className="max-w-6xl h-[90vh] flex flex-col p-0 gap-0" onClick={(e) => e.stopPropagation()}>
+                <DialogHeader className="px-6 py-4 border-b bg-background z-10" dir="ltr">
+                    <DialogTitle>{file.name}</DialogTitle>
                 </DialogHeader>
 
-                <div className="flex-1 overflow-auto relative">
-                    {isLoading && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
+                <div className="flex-1 w-full h-full relative bg-muted/20">
+                    {isLoading && !error && (
+                        <div className="absolute inset-0 flex items-center justify-center z-10">
                             <LoaderIcon className="w-8 h-8 animate-spin text-primary" />
                         </div>
                     )}
 
-                    {error ? (
-                        <div className="flex flex-col items-center justify-center h-full text-red-500 gap-2" dir="rtl">
-                            <p className="font-medium text-lg">שגיאה בטעינת הקובץ</p>
-                            <p className="text-sm text-muted-foreground">{error}</p>
+                    {error && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-muted-foreground">
+                            <AlertCircle className="w-12 h-12" />
+                            <p>{error}</p>
                         </div>
-                    ) : (
-                        <div ref={containerRef} />
+                    )}
+
+                    {previewUrl && (
+                        <iframe
+                            src={previewUrl}
+                            className="w-full h-full border-0"
+                            onLoad={() => setIsLoading(false)}
+                            title="File Preview"
+                            sandbox={isPdf ? undefined : "allow-scripts allow-same-origin allow-popups allow-forms"}
+                        />
                     )}
                 </div>
             </DialogContent>
         </Dialog>
     );
-}
+};
