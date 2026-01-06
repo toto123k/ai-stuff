@@ -43,9 +43,13 @@ import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
+
+
 export const maxDuration = 60;
 
 let globalStreamContext: ResumableStreamContext | null = null;
+
+
 
 const getTokenlensCatalog = cache(
   async (): Promise<ModelCatalog | undefined> => {
@@ -125,8 +129,9 @@ export async function POST(request: Request) {
         return new ChatSDKError("forbidden:chat").toResponse();
       }
     } else {
-      const title = await generateTitleFromUserMessage({ message: sanitizedMessage as any });
-      console.log("title", title);
+      // const title = await generateTitleFromUserMessage({ message: sanitizedMessage as any });
+      // console.log("title", title);
+      const title = "test";
       await saveChat({ id, userId: session.user.id, title, visibility: selectedVisibilityType });
     }
 
@@ -181,12 +186,15 @@ export async function POST(request: Request) {
 
         return {
           ...message,
-          experimental_providerMetadata: {
+          providerOptions: {
             ...existingMetadata,
             app: {
               ...existingAppMetadata,
               selectedFiles: files,
             },
+            'mock-llm': {
+              selectedFiles: files,
+            }
           },
         } as ModelMessage;
       });
@@ -224,8 +232,21 @@ export async function POST(request: Request) {
             runSpreadsheetQuery,
           },
           toolChoice: "auto",
+          // @ts-ignore
+          experimental_providerMetadata: {
+            'mock-llm': { selectedFiles }
+          },
+
+          providerOptions: {
+            'mock-llm': {
+              selectedFiles: selectedFiles,
+            }
+          },
+
           experimental_telemetry: { isEnabled: isProductionEnvironment, functionId: "stream-text" },
           onFinish: async ({ usage }) => {
+            // ... (rest of onFinish logic)
+            // Need to close scope here? No, arrow function is inside scope.
             try {
               const providers = await getTokenlensCatalog();
               const modelId = myProvider.languageModel(selectedChatModel).modelId;
