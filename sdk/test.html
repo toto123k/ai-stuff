@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>בדיקת SDK צ'אט</title>
+    <style>
+        body {
+            display: flex;
+            height: 100vh;
+            margin: 0;
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        .controls {
+            width: 380px;
+            padding: 20px;
+            border-left: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            background: #16213e;
+            overflow-y: auto;
+        }
+        .controls h2 {
+            margin: 0 0 10px 0;
+            color: #00d4ff;
+        }
+        .controls label {
+            font-size: 12px;
+            color: #888;
+        }
+        .controls input, .controls textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #333;
+            border-radius: 4px;
+            background: #0f0f23;
+            color: #eee;
+            font-family: monospace;
+            font-size: 11px;
+        }
+        .controls textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        .controls button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+        .controls button.primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .controls button.danger {
+            background: #e74c3c;
+            color: white;
+        }
+        .controls button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .iframe-container {
+            flex: 1;
+        }
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid #333;
+            margin: 10px 0;
+        }
+        .example-hint {
+            font-size: 10px;
+            color: #666;
+            margin-top: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <h2>🔧 בקרות SDK</h2>
+        
+        <div>
+            <label>מפתח (Key):</label>
+            <input type="text" id="key" value="ticket">
+        </div>
+        
+        <div>
+            <label>ערך (JSON):</label>
+            <textarea id="value">{
+  "id": 12345,
+  "status": "open",
+  "priority": "high",
+  "customer": {
+    "name": "ישראל ישראלי",
+    "email": "israel@example.com",
+    "vip": true
+  }
+}</textarea>
+        </div>
+        
+        <div>
+            <label>מפת תצוגה למפתחות (Display Map):</label>
+            <textarea id="displayMap">{
+  "ticket": "פנייה",
+  "id": "מספר פנייה",
+  "status": "סטטוס",
+  "priority": "עדיפות",
+  "customer": "פרטי לקוח",
+  "customer.name": "שם הלקוח",
+  "customer.email": "דוא\"ל",
+  "customer.vip": "לקוח VIP"
+}</textarea>
+            <div class="example-hint">* מחליף את שמות המפתחות בתצוגה</div>
+        </div>
+
+        <div>
+            <label>מפת תצוגה לערכים (Value Display Map):</label>
+            <textarea id="valueDisplayMap">{
+  "status:open": "פתוח",
+  "status:closed": "סגור",
+  "status:pending": "ממתין",
+  "priority:high": "גבוהה",
+  "priority:medium": "בינונית",
+  "priority:low": "נמוכה",
+  "customer.vip:true": "כן ⭐",
+  "customer.vip:false": "לא"
+}</textarea>
+            <div class="example-hint">* פורמט: "path:value" → "תצוגה"</div>
+        </div>
+
+        <button class="primary" onclick="setMeta()">📤 שלח מטאדטה</button>
+        <button class="danger" onclick="clearMeta()">🗑️ נקה הכל</button>
+
+        <hr>
+        
+        <div>
+            <label>כתובת Iframe:</label>
+            <input type="text" id="url" value="http://localhost:3000">
+        </div>
+        <button onclick="loadIframe()">🔄 טען צ'אט</button>
+    </div>
+    
+    <div class="iframe-container">
+        <iframe id="chat-frame" src=""></iframe>
+    </div>
+
+    <!-- Load the built SDK -->
+    <script src="./dist/bundle.js"></script>
+    <script>
+        let client;
+
+        function loadIframe() {
+            const url = document.getElementById('url').value;
+            const iframe = document.getElementById('chat-frame');
+            iframe.src = url;
+            
+            iframe.onload = () => {
+                console.log("Iframe loaded");
+                client = new ChatDataSDK.ChatEmbedClient({
+                    targetWindow: iframe.contentWindow,
+                    targetOrigin: "*"
+                });
+            };
+        }
+
+        function setMeta() {
+            if (!client) return alert("טען את ה-iframe קודם");
+            
+            const key = document.getElementById('key').value;
+            let value = document.getElementById('value').value;
+            let displayMap = document.getElementById('displayMap').value;
+            let valueDisplayMap = document.getElementById('valueDisplayMap').value;
+            
+            // Parse JSON values
+            try {
+                value = JSON.parse(value);
+            } catch (e) {
+                // keep as string if not valid JSON
+            }
+            
+            try {
+                displayMap = displayMap.trim() ? JSON.parse(displayMap) : undefined;
+            } catch (e) {
+                console.warn("Invalid displayMap JSON, ignoring");
+                displayMap = undefined;
+            }
+
+            try {
+                valueDisplayMap = valueDisplayMap.trim() ? JSON.parse(valueDisplayMap) : undefined;
+            } catch (e) {
+                console.warn("Invalid valueDisplayMap JSON, ignoring");
+                valueDisplayMap = undefined;
+            }
+
+            console.log("Sending metadata:", { key, value, displayMap, valueDisplayMap });
+            client.setMetadata(key, value, displayMap, valueDisplayMap);
+        }
+
+        function clearMeta() {
+            if (!client) return alert("טען את ה-iframe קודם");
+            client.clearMetadata();
+        }
+
+        // Auto load on page ready
+        loadIframe();
+    </script>
+</body>
+</html>

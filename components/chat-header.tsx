@@ -6,6 +6,7 @@ import { memo } from "react";
 import { useWindowSize } from "usehooks-ts";
 import { SidebarToggle } from "@/components/sidebar-toggle";
 import { Button } from "@/components/ui/button";
+
 import { PlusIcon, VercelIcon } from "./icons";
 import { useSidebar } from "./ui/sidebar";
 import { VisibilitySelector, type VisibilityType } from "./visibility-selector";
@@ -43,11 +44,14 @@ function PureChatHeader({
       )}
 
       {!isReadonly && (
-        <VisibilitySelector
-          chatId={chatId}
-          className="order-1 md:order-2"
-          selectedVisibilityType={selectedVisibilityType}
-        />
+        <>
+          <VisibilitySelector
+            chatId={chatId}
+            className="order-1 md:order-2"
+            selectedVisibilityType={selectedVisibilityType}
+          />
+
+        </>
       )}
 
       <Button

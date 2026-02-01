@@ -1,0 +1,27 @@
+{
+  "name": "ai-chatbot-embed-sdk",
+  "version": "1.0.0",
+  "description": "Client SDK for embedding the AI Chatbot",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "rollup -c"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "rollup": "^4.24.0",
+    "rollup-plugin-dts": "^6.1.0",
+    "rollup-plugin-esbuild": "^6.1.1",
+    "typescript": "^5.6.3",
+    "zod": "^3.23.8"
+  },
+  "dependencies": {
+    "esbuild": "^0.27.2",
+    "zod": "^3.23.8"
+  }
+}

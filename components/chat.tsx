@@ -21,6 +21,7 @@ import {
 import { useArtifactSelector } from "@/hooks/use-artifact";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
+import { useMetadataBridge } from "@/hooks/use-metadata-bridge";
 import type { Vote } from "@/lib/db/schema";
 import { ChatSDKError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
@@ -34,6 +35,7 @@ import { getChatHistoryPaginationKey } from "./sidebar-history";
 import { toast } from "./toast";
 import type { VisibilityType } from "./visibility-selector";
 import { selectedLibraryItemsAtom } from "@/lib/store/lib-selector-store";
+import { chatMetadataAtom } from "@/lib/store/metadata-store";
 
 export function Chat({
   id,
@@ -59,6 +61,8 @@ export function Chat({
 
   const selectedLibraryItems = useAtomValue(selectedLibraryItemsAtom);
 
+  useMetadataBridge();
+
   console.log(selectedLibraryItems)
   const { mutate } = useSWRConfig();
   const { setDataStream } = useDataStream();
@@ -70,6 +74,10 @@ export function Chat({
   const currentModelIdRef = useRef(currentModelId);
   const selectedLibraryItemsRef = useRef(selectedLibraryItems);
 
+  // Hook into metadata store for request injection
+  const metadata = useAtomValue(chatMetadataAtom);
+  const metadataRef = useRef(metadata);
+
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
@@ -77,6 +85,10 @@ export function Chat({
   useEffect(() => {
     selectedLibraryItemsRef.current = selectedLibraryItems;
   }, [selectedLibraryItems]);
+
+  useEffect(() => {
+    metadataRef.current = metadata;
+  }, [metadata]);
 
   const {
     messages,
@@ -97,6 +109,7 @@ export function Chat({
       prepareSendMessagesRequest(request) {
         const lastMessage = request.messages.at(-1);
         const selectedFiles = selectedLibraryItemsRef.current;
+        const currentMetadata = metadataRef.current;
 
         let messageParts = lastMessage?.parts || [];
 
@@ -114,12 +127,20 @@ export function Chat({
           messageParts = [...messageParts, ...libraryParts] as any;
         }
 
+        // Reduce metadata to just values for the backend
+        const backendMetadata = Object.entries(currentMetadata).reduce((acc, [key, item]) => {
+          // @ts-ignore
+          acc[key] = item.value;
+          return acc;
+        }, {} as Record<string, any>);
+
         return {
           body: {
             id: request.id,
             message: lastMessage ? { ...lastMessage, parts: messageParts } : lastMessage,
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
+            metadata: backendMetadata,
             ...request.body,
           },
         };

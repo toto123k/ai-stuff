@@ -96,6 +96,7 @@ export async function POST(request: Request) {
       message,
       selectedChatModel,
       selectedVisibilityType,
+      metadata,
     } = requestBody;
 
     // Extract selected files from message parts
@@ -240,6 +241,10 @@ export async function POST(request: Request) {
           providerOptions: {
             'mock-llm': {
               selectedFiles: selectedFiles,
+              ...metadata,
+            },
+            app: {
+              ...metadata
             }
           },
 
