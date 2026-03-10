@@ -1,11 +1,35 @@
 import { z } from "zod";
 
+export type FilterOperator =
+    | "equal"
+    | "not_equal"
+    | "greater_then"
+    | "greater_then_or_equal"
+    | "less_then"
+    | "less_then_or_equal"
+    | "contained_in_list"
+    | "not_contained_in_list"
+    | "has_all_values"
+    | "has_any_value";
+
 // Copied from lib/metadata-schema.ts to ensure standalone no-deps
 const setMetadataSchema = z.object({
     type: z.literal("SET_METADATA"),
     payload: z.object({
         key: z.string(),
         value: z.any(),
+        operatorMap: z.record(z.enum([
+            "equal",
+            "not_equal",
+            "greater_then",
+            "greater_then_or_equal",
+            "less_then",
+            "less_then_or_equal",
+            "contained_in_list",
+            "not_contained_in_list",
+            "has_all_values",
+            "has_any_value",
+        ])),
         displayMap: z.record(z.string()).optional(),
         valueDisplayMap: z.record(z.string()).optional(),
     }),
@@ -49,16 +73,30 @@ export class ChatEmbedClient {
     }
 
     /**
-     * Set metadata with optional display maps for Hebrew/human-readable labels
+     * Set metadata with required operatorMap and optional display maps for Hebrew/human-readable labels
      * @param key - The root key for this metadata entry
      * @param value - The value (can be primitive or complex object)
-     * @param displayMap - Optional map of paths to display labels, e.g. {"user.name": "שם משתמש"}
-     * @param valueDisplayMap - Optional map of "path:value" to display values, e.g. {"status:open": "פתוח"}
+     * @param operatorMap - Required map of paths to filter operators
+     * @param options - Additional options including display maps
      */
-    public setMetadata(key: string, value: any, displayMap?: Record<string, string>, valueDisplayMap?: Record<string, string>) {
+    public setMetadata(
+        key: string,
+        value: any,
+        operatorMap: Record<string, FilterOperator>,
+        options?: {
+            displayMap?: Record<string, string>;
+            valueDisplayMap?: Record<string, string>;
+        }
+    ) {
         const message: SetMetadataMessage = {
             type: "SET_METADATA",
-            payload: { key, value, displayMap, valueDisplayMap },
+            payload: {
+                key,
+                value,
+                operatorMap,
+                displayMap: options?.displayMap,
+                valueDisplayMap: options?.valueDisplayMap
+            },
         };
 
         this.postMessage(message);

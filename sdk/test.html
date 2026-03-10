@@ -95,6 +95,16 @@
         </div>
         
         <div>
+            <label>מפת אופרטורים (Operator Map):</label>
+            <textarea id="operatorMap">{
+  "status": "equal",
+  "priority": "greater_then_or_equal",
+  "customer.vip": "equal"
+}</textarea>
+            <div class="example-hint">* מתאים אופרטורים לפי מסלול הנתונים</div>
+        </div>
+        
+        <div>
             <label>ערך (JSON):</label>
             <textarea id="value">{
   "id": 12345,
@@ -178,32 +188,40 @@
             
             const key = document.getElementById('key').value;
             let value = document.getElementById('value').value;
+            let operatorMap = document.getElementById('operatorMap').value;
             let displayMap = document.getElementById('displayMap').value;
             let valueDisplayMap = document.getElementById('valueDisplayMap').value;
             
             // Parse JSON values
             try {
                 value = JSON.parse(value);
+            } catch (e) {}
+            
+            try {
+                operatorMap = operatorMap.trim() ? JSON.parse(operatorMap) : undefined;
             } catch (e) {
-                // keep as string if not valid JSON
+                console.warn("Invalid operatorMap JSON, ignoring");
+                operatorMap = {}; // mandatory per schema, fallback to empty
             }
             
             try {
                 displayMap = displayMap.trim() ? JSON.parse(displayMap) : undefined;
             } catch (e) {
-                console.warn("Invalid displayMap JSON, ignoring");
                 displayMap = undefined;
             }
 
             try {
                 valueDisplayMap = valueDisplayMap.trim() ? JSON.parse(valueDisplayMap) : undefined;
             } catch (e) {
-                console.warn("Invalid valueDisplayMap JSON, ignoring");
                 valueDisplayMap = undefined;
             }
 
-            console.log("Sending metadata:", { key, value, displayMap, valueDisplayMap });
-            client.setMetadata(key, value, displayMap, valueDisplayMap);
+            console.log("Sending metadata:", { key, value, operatorMap, displayMap, valueDisplayMap });
+            if (!operatorMap) {
+                alert("חובה לבחור אופרטורים.");
+                return;
+            }
+            client.setMetadata(key, value, operatorMap, { displayMap, valueDisplayMap });
         }
 
         function clearMeta() {

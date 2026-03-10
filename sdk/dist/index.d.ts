@@ -1,3 +1,4 @@
+type FilterOperator = "equal" | "not_equal" | "greater_then" | "greater_then_or_equal" | "less_then" | "less_then_or_equal" | "contained_in_list" | "not_contained_in_list" | "has_all_values" | "has_any_value";
 declare class ChatEmbedClient {
     private targetWindow;
     private targetOrigin;
@@ -8,15 +9,19 @@ declare class ChatEmbedClient {
     setTargetWindow(window: Window): void;
     private postMessage;
     /**
-     * Set metadata with optional display maps for Hebrew/human-readable labels
+     * Set metadata with required operatorMap and optional display maps for Hebrew/human-readable labels
      * @param key - The root key for this metadata entry
      * @param value - The value (can be primitive or complex object)
-     * @param displayMap - Optional map of paths to display labels, e.g. {"user.name": "שם משתמש"}
-     * @param valueDisplayMap - Optional map of "path:value" to display values, e.g. {"status:open": "פתוח"}
+     * @param operatorMap - Required map of paths to filter operators
+     * @param options - Additional options including display maps
      */
-    setMetadata(key: string, value: any, displayMap?: Record<string, string>, valueDisplayMap?: Record<string, string>): void;
+    setMetadata(key: string, value: any, operatorMap: Record<string, FilterOperator>, options?: {
+        displayMap?: Record<string, string>;
+        valueDisplayMap?: Record<string, string>;
+    }): void;
     deleteMetadata(key: string): void;
     clearMetadata(): void;
 }
 
 export { ChatEmbedClient };
+export type { FilterOperator };

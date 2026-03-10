@@ -30,6 +30,7 @@ export function useMetadataBridge() {
                         ...prev,
                         [message.payload.key]: {
                             value: message.payload.value,
+                            operatorMap: message.payload.operatorMap,
                             displayMap: message.payload.displayMap,
                             valueDisplayMap: message.payload.valueDisplayMap,
                             origin: event.origin,

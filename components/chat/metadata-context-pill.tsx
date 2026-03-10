@@ -109,6 +109,7 @@ export function MetadataContextPill() {
                                                         data={item.value}
                                                         displayMap={displayMap}
                                                         valueDisplayMap={valueDisplayMap}
+                                                        operatorMap={item.operatorMap}
                                                     />
                                                 </div>
                                             </div>
